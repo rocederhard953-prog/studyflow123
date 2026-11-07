@@ -11,4 +11,4 @@ if __name__=='__main__':
         threading.Thread(target=run_bot,daemon=True,name='studyflow-telegram').start()
     else:
         print('TELEGRAM_BOT_TOKEN is not set; web app will run without Telegram.',flush=True)
-    uvicorn.run('app:app',host='0.0.0.0',port=int(os.getenv('PORT','8000')),workers=1,proxy_headers=True)
+    uvicorn.run('app:app',host='0.0.0.0',port=int(os.getenv('PORT','3000')),workers=1,proxy_headers=True)
