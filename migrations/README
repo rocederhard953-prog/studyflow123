@@ -1,0 +1,2 @@
+The application creates a new database schema automatically on first startup.
+For managed schema upgrades in deployments, use: alembic upgrade head
