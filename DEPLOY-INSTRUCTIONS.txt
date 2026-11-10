@@ -1,7 +1,0 @@
-My-Study deployment fix
-1. Upload ALL files and folders from this archive to the ROOT of the GitHub repository, preserving static/index.html, static/app.js, static/style.css, static/bot_images/*.jpg.
-2. Ensure Dockerfile and requirements.txt are in the repository root. Dockerfile COPY . . copies static.
-3. Commit, rebuild/redeploy (not only restart) on Bothost.
-4. Keep persistent DATA_DIR and DATABASE_URL unchanged. Never delete data/uploads or the database.
-5. Test / and /static/index.html.
-6. Ensure GitHub has app.py and bot.py from SAME archive.
