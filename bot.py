@@ -6,7 +6,7 @@ import hmac
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select
 from app import (SessionLocal, User, TelegramCode, TelegramLink, NotificationSetting,
-                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders)
+                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders)
 
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
 API=f'https://api.telegram.org/bot{TOKEN}/'
@@ -46,8 +46,8 @@ def tg(method, params=None, timeout=35):
     return data.get('result')
 
 def keyboard(rows=None):
-    rows=list(rows or [])
-    rows.append([{'text':'🌐 Открыть My-Study','url':SITE}])
+    rows=[[dict(button, style='primary') for button in row] for row in (rows or [])]
+    rows.append([{'text':'🌐 My-Study 2.1','url':SITE,'style':'primary'}])
     return json.dumps({'inline_keyboard':rows},ensure_ascii=False)
 
 def send(chat,text,rows=None,message_id=None):
@@ -65,12 +65,12 @@ def linked_user(db,chat):
 def main_menu():
     return [[{'text':'📅 Мой день','callback_data':'today'},{'text':'📚 Домашка','callback_data':'homework'}],
             [{'text':'✅ Привычки','callback_data':'habits'},{'text':'🗓 Расписание','callback_data':'schedule'}],
-            [{'text':'🔔 Напоминания','callback_data':'reminders'}]]
+            [{'text':'🔔 Напоминания','callback_data':'reminders'},{'text':'🌙 Сводка','callback_data':'summary'}]]
 
 def back(): return [[{'text':'⬅️ Главное меню','callback_data':'menu'}]]
 
 def send_section(chat,section,text,rows=None,message_id=None):
-    image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule'}.get(section)
+    image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule','tomorrow':'schedule'}.get(section)
     image_path=os.path.join(os.path.dirname(__file__),'static','bot_images',(image_name or '')+'.jpg')
     caption=text+'\n\n🌐 '+SITE
     if not image_name or not os.path.isfile(image_path) or len(caption)>1024:
@@ -138,7 +138,7 @@ def display(chat,section='menu',message_id=None):
         if section=='menu':
             if admin_authorized(chat):
                 return send_section(chat,section,'🛡 My-Study — меню администратора',main_menu()+[[{'text':'🛡 Админ-панель','callback_data':'admin'}]],message_id)
-            return send_section(chat,section,'✨ My-Study — твой учебный помощник\n\nВыбери раздел кнопками ниже.',main_menu(),message_id)
+            return send_section(chat,section,'✦ My-Study 2.1\nТвоё пространство для учёбы и привычек\n\nВыбери, чем займёмся сегодня.',main_menu(),message_id)
         if section=='today':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
@@ -154,7 +154,7 @@ def display(chat,section='menu',message_id=None):
         if section=='homework':
             tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False).order_by(Task.due,Task.id).limit(15)).all()
             rows=[[{'text':'➕ Добавить ДЗ','callback_data':'addhw'}]]+[[{'text':'☑️ '+t.title[:45],'callback_data':f'task:{t.id}'}] for t in tasks]+back()
-            return send_section(chat,section,'📚 Невыполненные задания\n\n'+('\n'.join(f'• {t.title} — {t.due or "без срока"}' for t in tasks) if tasks else 'Всё выполнено!'),rows,message_id)
+            return send_section(chat,section,'📚 Невыполненные задания\n\n'+('\n\n'.join(task_text(t) for t in tasks) if tasks else 'Всё выполнено!'),rows,message_id)
         if section in ('schedule','tomorrow'):
             day=today+(datetime.timedelta(days=1) if section=='tomorrow' else datetime.timedelta())
             lessons=db.scalars(select(Lesson).where(Lesson.user_id==user.id,Lesson.weekday==day.weekday()).order_by(Lesson.period)).all()
@@ -350,20 +350,23 @@ def handle(msg):
     display(chat,aliases.get(cmd,'menu'))
 
 def callback(q):
-    chat=str(q.get('message',{}).get('chat',{}).get('id',''))
-    source=q.get('message',{}).get('message_id')
-    result=_callback_impl(q)
-    if chat and source:
-        with SCREEN_LOCK:latest=SCREEN_IDS.get(chat)
-        if latest and latest!=source:delete_screen(chat,source)
-    return result
+    return _callback_impl(q)
 
 def _callback_impl(q):
     chat=str(q.get('message',{}).get('chat',{}).get('id',''))
     mid=q.get('message',{}).get('message_id'); action=q.get('data','')
+    with SCREEN_LOCK:screen=SCREEN_IDS.get(chat)
+    if mid!=screen:mid=None  # Never edit or delete a persistent notification.
     try: tg('answerCallbackQuery',{'callback_query_id':q['id']},timeout=10)
     except Exception: pass
     if not chat:return
+    if action.startswith(('ndone:', 'nsnooze:', 'nphoto:', 'nopen:')):return task_notification_action(chat,action)
+    if action=='summary':
+        with SessionLocal() as db:
+            user=linked_user(db,chat)
+            if not user:return display(chat,'menu',mid)
+            content,tasks=evening_summary(db,user,datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo(user.timezone or 'UTC')))
+            return send_long_notification(chat,content)
     if action=='addhw':return start_homework(chat,mid)
     if action=='addhabit':return start_habit(chat,mid)
     if action.startswith('habitdays:'):return habit_days(chat,action,mid)
@@ -507,9 +510,118 @@ def event_targets(db,user,local,source,event_id=None):
             lines += [f'• {x.period}. {x.subject} {x.start or ""}' for x in lessons]
             yield when,'\n'.join(lines),f'lessons:{day.isoformat()}'
 
+
+def task_text(task):
+    subject=(task.subject or '').strip() or 'Без предмета'
+    due=task.due.strftime('%d.%m.%Y') if task.due else 'Без срока'
+    return f'📘 {subject}\n📅 Срок: {due}\n📝 {task.title}'
+
+def task_rows(task):
+    return [[{'text':'✅ Выполнено','callback_data':f'ndone:{task.id}'},
+             {'text':'⏰ Через час','callback_data':f'nsnooze:{task.id}'}],
+            [{'text':'📷 Фото задания','callback_data':f'nphoto:{task.id}'}]]
+
+def notify(chat,text,rows=None):
+    # Notifications stay in chat independently of interactive navigation screens.
+    return tg('sendMessage',{'chat_id':chat,'text':text,
+              'disable_web_page_preview':'true','reply_markup':keyboard(rows)},timeout=20)
+
+def notify_task(chat,task,title='Домашнее задание'):
+    return notify(chat,'🔔 '+title+'\n\n'+task_text(task),task_rows(task))
+
+def send_task_photo(chat,attachment):
+    path=(UPLOAD_DIR/attachment.stored_name).resolve()
+    if path.parent!=UPLOAD_DIR.resolve() or not path.is_file():return False
+    boundary='----studyphoto'+uuid.uuid4().hex
+    caption=attachment.filename[:200]
+    chunks=[]
+    for name,value in [('chat_id',str(chat)),('caption',caption)]:
+        chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
+    chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo"\r\nContent-Type: {attachment.mime}\r\n\r\n').encode()+path.read_bytes()+b'\r\n')
+    raw=b''.join(chunks)+f'--{boundary}--\r\n'.encode()
+    request=urllib.request.Request(API+'sendPhoto',data=raw,headers={'Content-Type':'multipart/form-data; boundary='+boundary})
+    with urllib.request.urlopen(request,timeout=25) as response:result=json.loads(response.read())
+    if not result.get('ok'):raise RuntimeError(result.get('description','Photo failed'))
+    return True
+
+def task_notification_action(chat,action):
+    kind,_,value=action.partition(':')
+    try:ident=int(value)
+    except ValueError:return
+    with SessionLocal() as db:
+        user=linked_user(db,chat)
+        if not user:return notify(chat,'Сначала привяжи аккаунт My-Study.')
+        task=db.scalar(select(Task).where(Task.id==ident,Task.user_id==user.id))
+        if not task:return notify(chat,'Задание удалено или недоступно.')
+        if kind=='nopen':return notify_task(chat,task)
+        if kind=='ndone':
+            task.done=True
+            db.query(TaskSnooze).filter_by(user_id=user.id,task_id=task.id).delete()
+            db.commit()
+            return notify(chat,'✅ Выполнено\n\n'+task_text(task))
+        if kind=='nsnooze':
+            if task.done:return notify(chat,'Это задание уже выполнено.')
+            row=db.scalar(select(TaskSnooze).where(TaskSnooze.user_id==user.id,TaskSnooze.task_id==task.id))
+            if row is None:row=TaskSnooze(user_id=user.id,task_id=task.id);db.add(row)
+            row.send_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)+datetime.timedelta(hours=1)
+            db.commit()
+            return notify(chat,'⏰ Напомню через час. Срок сдачи не изменён.\n\n'+task_text(task))
+        photos=db.scalars(select(Attachment).where(Attachment.task_id==task.id,Attachment.user_id==user.id).order_by(Attachment.id)).all()
+        if not photos:return notify(chat,'У этого задания пока нет фотографий.\n\n'+task_text(task))
+        sent=0
+        for photo in photos:
+            try:sent+=bool(send_task_photo(chat,photo))
+            except Exception as exc:print('Task photo error:',repr(exc),flush=True)
+        if sent<len(photos):notify(chat,'Часть фотографий недоступна. Попробуй ещё раз или открой задание на сайте.')
+
+def homework_for_day(db,user,day):
+    # The due date is authoritative, even if a lesson was moved or is absent.
+    return db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False,Task.due==day).order_by(Task.id)).all()
+
+def evening_summary(db,user,local):
+    tomorrow=local.date()+datetime.timedelta(days=1)
+    lessons=db.scalars(select(Lesson).where(Lesson.user_id==user.id,Lesson.weekday==tomorrow.weekday()).order_by(Lesson.period)).all()
+    tasks=homework_for_day(db,user,tomorrow)
+    habits=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
+    checks={c.habit_id for c in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
+    pending=[h for h in habits if str(local.weekday()) in h.days.split(',') and h.id not in checks]
+    lines=[f'🌙 My-Study 2.1 · Вечерняя сводка',f'📅 Завтра, {tomorrow:%d.%m.%Y}', '\n🗓 Уроки']
+    lines.extend([f'{l.period}. {l.subject} · {l.start or "время не указано"}' for l in lessons] or ['Уроков нет.'])
+    lines.append('\n📚 Домашнее задание')
+    lines.extend([task_text(t)+'\n' for t in tasks] or ['На завтра заданий нет.'])
+    lines.append('\n✅ Осталось привычек сегодня')
+    lines.extend(['• '+h.name for h in pending] or ['Все привычки выполнены!'])
+    return '\n'.join(lines),tasks
+
+def send_long_notification(chat,text):
+    # Split on lines and preserve all content within Telegram's 4096 limit.
+    while text:
+        end=len(text) if len(text)<=3800 else text.rfind('\n',0,3800)
+        if end<=0:end=3800
+        notify(chat,text[:end])
+        text=text[end:].lstrip('\n')
+
+def snooze_tick(db,utc):
+    for row in db.scalars(select(TaskSnooze).where(TaskSnooze.send_at<=utc.replace(tzinfo=None))).all():
+        task=db.scalar(select(Task).where(Task.id==row.task_id,Task.user_id==row.user_id))
+        link=db.scalar(select(TelegramLink).where(TelegramLink.user_id==row.user_id))
+        setting=db.scalar(select(NotificationSetting).where(NotificationSetting.user_id==row.user_id))
+        if not task or task.done or not link:
+            db.delete(row);db.commit();continue
+        if setting and not setting.enabled:continue
+        try:
+            notify_task(link.chat_id,task,'Ты просил напомнить')
+            db.delete(row);db.commit()
+        except Exception as exc:
+            db.rollback();print('Snooze error:',repr(exc),flush=True)
+
 def notification_tick():
     utc=datetime.datetime.now(datetime.timezone.utc)
     with SessionLocal() as db:
+        for user in db.scalars(select(User).join(TelegramLink,TelegramLink.user_id==User.id)).all():
+            ensure_default_reminders(db,user.id)
+        db.commit()
+        snooze_tick(db,utc)
         reminders=db.scalars(select(Reminder).where(Reminder.enabled==True)).all()
         for reminder in reminders:
             try:
@@ -534,7 +646,7 @@ def notification_tick():
                         key=f'{event_key}:{mode}:{target.isoformat()}'
                         if timing.last_event_key==key:continue
                         # Event-relative reminders are explicitly scheduled and bypass generic quiet hours.
-                        send(link.chat_id,'🔔 '+reminder.title+'\n\n'+content,[[{'text':'📅 Мой день','callback_data':'today'}]])
+                        notify(link.chat_id,'🔔 '+reminder.title+'\n\n'+content,[[{'text':'📅 Мой день','callback_data':'today'}]])
                         timing.last_event_key=key
                         reminder.last_sent=utc.replace(tzinfo=None)
                         db.commit()
@@ -546,24 +658,21 @@ def notification_tick():
                     last=reminder.last_sent.replace(tzinfo=datetime.timezone.utc).astimezone(local.tzinfo)
                     if last.date()==local.date():continue
                 content=reminder.title
-                if reminder.kind=='tasks':
-                    tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False).order_by(Task.due).limit(5)).all()
-                    content+='\n\n'+('\n'.join('• '+t.title for t in tasks) if tasks else 'Все задания выполнены!')
-                elif reminder.kind=='homework_eve':
-                    tomorrow=local.date()+datetime.timedelta(days=1)
-                    lessons=db.scalars(select(Lesson).where(Lesson.user_id==user.id,Lesson.weekday==tomorrow.weekday()).order_by(Lesson.period)).all()
-                    subjects={x.subject.strip().casefold() for x in lessons if x.subject and x.subject.strip()}
-                    if not subjects:continue
-                    tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False)).all()
-                    pending=[t for t in tasks if (t.subject or '').strip().casefold() in subjects]
-                    if not pending:continue
-                    lines=[f'📚 Домашнее задание на завтра ({tomorrow.strftime("%d.%m")})']
-                    for lesson in lessons:
-                        related=[t for t in pending if (t.subject or '').strip().casefold()==lesson.subject.strip().casefold()]
-                        if related:
-                            lines.append(f'\n📖 {lesson.subject}:')
-                            lines.extend('• '+t.title for t in related[:10])
-                    content='\n'.join(lines)
+                if reminder.kind in ('tasks','homework_eve'):
+                    if reminder.kind=='tasks':
+                        tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False).order_by(Task.id)).all()
+                    else:
+                        tasks=homework_for_day(db,user,local.date()+datetime.timedelta(days=1))
+                    for task in tasks:notify_task(link.chat_id,task,reminder.title)
+                    if not tasks and reminder.kind=='tasks':notify(link.chat_id,'✅ Все задания выполнены!')
+                    reminder.last_sent=utc.replace(tzinfo=None);db.commit()
+                    continue
+                elif reminder.kind=='evening_summary':
+                    content,tasks=evening_summary(db,user,local)
+                    send_long_notification(link.chat_id,content)
+                    if tasks:notify(link.chat_id,'Действия с домашним заданием',[[{'text':(t.subject or 'ДЗ')[:20]+' · '+t.title[:25],'callback_data':f'nopen:{t.id}'}] for t in tasks])
+                    reminder.last_sent=utc.replace(tzinfo=None);db.commit()
+                    continue
                 elif reminder.kind=='habits':
                     hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
                     checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
@@ -573,7 +682,7 @@ def notification_tick():
                     target_day=local.date()+datetime.timedelta(days=1) if reminder.kind=='schedule_tomorrow' else local.date()
                     lessons=db.scalars(select(Lesson).where(Lesson.user_id==user.id,Lesson.weekday==target_day.weekday()).order_by(Lesson.period)).all()
                     content+='\n\n'+('\n'.join(f'{x.period}. {x.subject} {x.start}' for x in lessons) if lessons else 'Уроков нет.')
-                send(link.chat_id,'🔔 '+content,[[{'text':'📅 Мой день','callback_data':'today'}]])
+                notify(link.chat_id,'🔔 '+content,[[{'text':'📅 Мой день','callback_data':'today'}]])
                 reminder.last_sent=utc.replace(tzinfo=None);db.commit()
             except Exception as exc:
                 db.rollback();print('Reminder error:',repr(exc),flush=True)

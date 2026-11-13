@@ -72,6 +72,14 @@ class Task(Base):
     title: Mapped[str]=mapped_column(String(240)); subject: Mapped[str]=mapped_column(String(120),default=''); description: Mapped[str]=mapped_column(Text,default='')
     due: Mapped[Optional[date]]=mapped_column(Date,nullable=True); priority: Mapped[str]=mapped_column(String(12),default='normal'); done: Mapped[bool]=mapped_column(Boolean,default=False)
     created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
+class TaskSnooze(Base):
+    __tablename__='task_snoozes'
+    __table_args__=(UniqueConstraint('user_id','task_id'),)
+    id: Mapped[int]=mapped_column(primary_key=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
+    task_id: Mapped[int]=mapped_column(ForeignKey('tasks.id',ondelete='CASCADE'),index=True)
+    send_at: Mapped[datetime]=mapped_column(DateTime,index=True)
+
 class Attachment(Base):
     __tablename__='task_attachments'
     id: Mapped[int]=mapped_column(primary_key=True); user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
@@ -145,7 +153,7 @@ class ReminderTiming(Base):
     last_event_key: Mapped[str]=mapped_column(String(120),default='')
 
 Base.metadata.create_all(engine)
-app=FastAPI(title='My-Study',version='2.0.0')
+app=FastAPI(title='My-Study 2.1',version='2.1.0')
 app.mount('/static',StaticFiles(directory=BASE/'static'),name='static')
 
 def dbdep():
@@ -195,7 +203,7 @@ async def security_headers(request:Request, call_next):
 @app.get('/')
 def home(): return FileResponse(BASE/'static'/'index.html')
 @app.get('/api/health')
-def health(): return {'ok':True,'version':'2.0.0'}
+def health(): return {'ok':True,'version':'2.1.0'}
 class Credentials(BaseModel): email:str; username:str; password:str=Field(min_length=8,max_length=128); display_name:str=''
 class LoginData(BaseModel): login:str; password:str
 
@@ -496,7 +504,7 @@ def reminder_fields(d, obj):
         if not 1<=len(title)<=120: raise HTTPException(422,'Название: от 1 до 120 символов')
         obj.title=title
     if 'kind' in d:
-        if d['kind'] not in ('general','tasks','homework_eve','habits','schedule','schedule_tomorrow','goals'): raise HTTPException(422,'Неизвестный тип')
+        if d['kind'] not in ('general','tasks','homework_eve','habits','schedule','schedule_tomorrow','goals','evening_summary'): raise HTTPException(422,'Неизвестный тип')
         obj.kind=d['kind']
     if 'send_time' in d:
         if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',str(d['send_time'])): raise HTTPException(422,'Неверное время')
@@ -596,6 +604,11 @@ DEFAULT_REMINDERS=[('Расписание на сегодня','schedule','07:00
 def ensure_default_reminders(db,user_id):
     # Never overwrite existing user-configured reminders or re-create after linking.
     key=db.scalar(select(UserSetting).where(UserSetting.user_id==user_id,UserSetting.key=='default_reminders_v2_seeded'))
+    summary_key=db.scalar(select(UserSetting).where(UserSetting.user_id==user_id,UserSetting.key=='evening_summary_v21_seeded'))
+    if not summary_key:
+        if not db.scalar(select(Reminder.id).where(Reminder.user_id==user_id,Reminder.kind=='evening_summary')):
+            db.add(Reminder(user_id=user_id,title='Вечерняя сводка',kind='evening_summary',send_time='20:00',days='0,1,2,3,4,5,6',enabled=True))
+        db.add(UserSetting(user_id=user_id,key='evening_summary_v21_seeded',value='1'))
     if key:return
     # One-time backfill for existing accounts: keep all custom reminders unchanged.
     # Once marked, deleted defaults are never recreated.
