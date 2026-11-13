@@ -136,8 +136,6 @@ def display(chat,section='menu',message_id=None):
         except Exception: today=datetime.datetime.now(datetime.timezone.utc).date()
         wd=today.weekday()
         if section=='menu':
-            if admin_authorized(chat):
-                return send_section(chat,section,'🛡 My-Study — меню администратора',main_menu()+[[{'text':'🛡 Админ-панель','callback_data':'admin'}]],message_id)
             return send_section(chat,section,'✦ My-Study 2.1\nТвоё пространство для учёбы и привычек\n\nВыбери, чем займёмся сегодня.',main_menu(),message_id)
         if section=='today':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
@@ -371,7 +369,7 @@ def _callback_impl(q):
     if action=='addhabit':return start_habit(chat,mid)
     if action.startswith('habitdays:'):return habit_days(chat,action,mid)
     if action=='habitcancel':cancel_draft(chat);return display(chat,'habits',mid)
-    if action=='admin':return admin_login(chat)
+    if action=='admin':return display(chat,'menu',mid)  # Retire buttons from older messages; use /admin.
     if action=='broadcast':return broadcast_start(chat,mid)
     if action=='broadcastsend':return broadcast_send(chat,mid)
     if action=='broadcastcancel':cancel_draft(chat);return admin_panel(chat,mid)
