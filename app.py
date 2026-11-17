@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import (create_engine, String, Integer, Boolean, DateTime, Date, ForeignKey,
                         Text, Float, UniqueConstraint, select, func, and_)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
+import assistant_service as assistant
 
 BASE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv('DATA_DIR', str(BASE / 'data'))).resolve()
@@ -79,6 +81,12 @@ class TaskSnooze(Base):
     user_id: Mapped[int]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
     task_id: Mapped[int]=mapped_column(ForeignKey('tasks.id',ondelete='CASCADE'),index=True)
     send_at: Mapped[datetime]=mapped_column(DateTime,index=True)
+
+class AIUsage(Base):
+    __tablename__='ai_usage'
+    scope: Mapped[str]=mapped_column(String(64),primary_key=True)
+    day: Mapped[date]=mapped_column(Date,primary_key=True)
+    requests: Mapped[int]=mapped_column(Integer,default=0)
 
 class Attachment(Base):
     __tablename__='task_attachments'
@@ -595,6 +603,79 @@ def startup():
     with SessionLocal() as db:
         db.query(AuthSession).filter(AuthSession.expires_at<datetime.utcnow()).delete(); db.query(TelegramCode).filter(TelegramCode.expires_at<datetime.utcnow()).delete(); db.commit()
 
+# AI assistance is read-only. Only the explicitly selected, owned task is sent.
+def reserve_ai_request(db, user_id):
+    day=datetime.now(timezone.utc).date()
+    limits=[('site',assistant.positive_setting('AI_SITE_DAILY_LIMIT',200,10000)),
+            (f'user:{user_id}',assistant.positive_setting('AI_USER_DAILY_LIMIT',20,500))]
+    for scope,limit in limits:
+        if db.get(AIUsage,(scope,day)) is None:
+            try:
+                with db.begin_nested():
+                    db.add(AIUsage(scope=scope,day=day,requests=0));db.flush()
+            except IntegrityError:
+                pass
+        changed=db.query(AIUsage).filter(AIUsage.scope==scope,AIUsage.day==day,AIUsage.requests<limit).update(
+            {AIUsage.requests:AIUsage.requests+1},synchronize_session=False)
+        if not changed:
+            db.rollback()
+            raise HTTPException(429,'Дневной лимит ИИ исчерпан. Попробуй после 00:00 UTC. Навигация по сайту работает без лимита.')
+    db.commit()
+
+def assistant_images(db,user,task):
+    import base64
+    photos=db.scalars(select(Attachment).where(Attachment.user_id==user.id,Attachment.task_id==task.id).order_by(Attachment.id).limit(2)).all()
+    if not photos:raise HTTPException(422,'У выбранного задания нет фотографий. Добавь фото или отключи их отправку.')
+    images=[]
+    for photo in photos:
+        if photo.mime not in ('image/jpeg','image/png','image/webp'):
+            raise HTTPException(422,'Для ИИ подходят JPG, PNG и WEBP. Перепиши условие из GIF или загрузи другое фото.')
+        path=(UPLOAD_DIR/photo.stored_name).resolve()
+        if path.parent!=UPLOAD_DIR.resolve() or not path.is_file():
+            raise HTTPException(422,'Фотография недоступна. Загрузи её ещё раз или отключи отправку фото.')
+        if path.stat().st_size>4*1024*1024:
+            raise HTTPException(413,'Для ИИ каждое фото должно быть не больше 4 МБ.')
+        with path.open('rb') as source:raw=source.read(4*1024*1024+1)
+        if not raw or len(raw)>4*1024*1024:raise HTTPException(413,'Некорректный размер фотографии.')
+        images.append('data:'+photo.mime+';base64,'+base64.b64encode(raw).decode())
+    return images
+
+@app.get('/api/assistant/status')
+def assistant_status(user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    day=datetime.now(timezone.utc).date()
+    used=db.get(AIUsage,(f'user:{user.id}',day))
+    site_used=db.get(AIUsage,('site',day))
+    limit=assistant.positive_setting('AI_USER_DAILY_LIMIT',20,500)
+    site_limit=assistant.positive_setting('AI_SITE_DAILY_LIMIT',200,10000)
+    return {'ai_ready':assistant.ai_configured(),'daily_limit':limit,
+            'remaining':max(0,min(limit-(used.requests if used else 0),site_limit-(site_used.requests if site_used else 0))),
+            'reset_at':datetime.combine(day+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc).isoformat(),
+            'navigation_ready':True}
+
+@app.post('/api/assistant/chat')
+def assistant_chat(data:assistant.AssistantRequest,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    if not data.message.strip():raise HTTPException(422,'Напиши вопрос.')
+    if sum(len(x.content) for x in data.history)>16000:
+        raise HTTPException(422,'Переписка слишком длинная. Начни новый диалог.')
+    task=owned(db,Task,data.task_id,user) if data.task_id is not None else None
+    if data.include_photos and task is None:raise HTTPException(422,'Сначала выбери задание с фотографиями.')
+    guide=assistant.site_guide(data.message,data.mode)
+    if guide:return guide
+    if not assistant.ai_configured():
+        raise HTTPException(503,'Помощь по ДЗ ещё не подключена. Навигация по сайту уже работает.')
+    context={'current_page':data.page if data.page in assistant.PAGES else 'home'}
+    if task:
+        context['task']={'subject':task.subject,'title':task.title,'description':task.description,
+                         'due':task.due.isoformat() if task.due else None}
+    images=assistant_images(db,user,task) if data.include_photos else []
+    assistant.acquire_slot(user.id)
+    try:
+        reserve_ai_request(db,user.id)
+        return assistant.ask_ai(data,context,images)
+    finally:
+        assistant.release_slot(user.id)
+
+
 if __name__=='__main__':
     import uvicorn
     uvicorn.run('app:app',host='0.0.0.0',port=int(os.getenv('PORT','8000')),workers=1)
@@ -648,3 +729,5 @@ def put_lesson_notes(d:dict,user:User=Depends(current_user),db:Session=Depends(d
     row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='lesson_notes'))
     if not row:row=UserSetting(user_id=user.id,key='lesson_notes');db.add(row)
     row.value=json.dumps(notes,ensure_ascii=False);db.commit();return notes
+
+

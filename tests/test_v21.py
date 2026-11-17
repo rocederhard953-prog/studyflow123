@@ -164,5 +164,128 @@ class V21Tests(unittest.TestCase):
             self.assertEqual(client.get('/').status_code,200)
 
 
+class AssistantTests(unittest.TestCase):
+    task = V21Tests.task
+
+    def setUp(self):
+        V21Tests.setUp(self)
+        self.env = patch.dict(os.environ, {'OPENAI_API_KEY':'', 'AI_ENABLED':'1', 'AI_USER_DAILY_LIMIT':'2', 'AI_SITE_DAILY_LIMIT':'4'})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        app.app.dependency_overrides[app.current_user] = lambda: self.user
+        self.addCleanup(app.app.dependency_overrides.clear)
+        self.client = TestClient(app.app)
+        self.client.cookies.set('sf_csrf','test-csrf')
+        self.headers={'X-CSRF-Token':'test-csrf'}
+        self.addCleanup(self.client.close)
+
+    def chat(self, **data):
+        return self.client.post('/api/assistant/chat',json={'message':'Объясни решение',**data},headers=self.headers)
+
+    def test_navigation_works_without_key_or_paid_request(self):
+        with patch.object(app.assistant,'ask_ai') as provider:
+            r=self.chat(message='Как изменить время вечерней сводки?',mode='navigation')
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual(r.json()['source'],'guide')
+        self.assertEqual(r.json()['actions'][0]['page'],'reminders')
+        provider.assert_not_called()
+        with app.SessionLocal() as db:
+            self.assertEqual(db.scalars(select(app.AIUsage)).all(),[])
+
+    def test_missing_key_has_honest_status_and_study_error(self):
+        status=self.client.get('/api/assistant/status').json()
+        self.assertFalse(status['ai_ready'])
+        self.assertTrue(status['navigation_ready'])
+        self.assertEqual(self.chat().status_code,503)
+        self.assertNotIn('OPENAI_API_KEY',self.client.get('/api/assistant/status').text)
+
+    def test_tutoring_question_is_not_confused_with_site_navigation(self):
+        self.assertIsNone(app.assistant.site_guide('Где ошибка в решении домашнего задания?', 'study'))
+        response=app.assistant.site_guide('Где настройки напоминаний?', 'navigation')
+        self.assertEqual(response['actions'][0]['page'],'reminders')
+
+    def test_chat_needs_auth_and_csrf(self):
+        app.app.dependency_overrides.clear()
+        self.assertEqual(self.client.get('/api/assistant/status').status_code,401)
+        self.assertEqual(self.chat(mode='navigation').status_code,401)
+        self.assertEqual(self.client.post('/api/assistant/chat',json={'message':'Где ДЗ?'}).status_code,403)
+
+    def test_cannot_select_another_users_task_even_for_navigation(self):
+        with app.SessionLocal() as db:
+            t=app.Task(user_id=self.other.id,subject='Private',title='Secret');db.add(t);db.commit();ident=t.id
+        with patch.object(app.assistant,'ask_ai') as provider:
+            r=self.chat(task_id=ident,mode='navigation')
+        self.assertEqual(r.status_code,404)
+        self.assertNotIn('Secret',r.text)
+        provider.assert_not_called()
+
+    def test_only_selected_task_is_sent_and_photos_require_opt_in(self):
+        task=self.task()
+        with app.SessionLocal() as db:
+            db.add(app.Task(user_id=self.user.id,title='UNSELECTED PRIVATE TASK',subject='Other'))
+            db.add(app.Attachment(user_id=self.user.id,task_id=task.id,filename='photo.jpg',stored_name='missing.jpg',mime='image/jpeg'));db.commit()
+        os.environ['OPENAI_API_KEY']='test-only-not-a-real-key'
+        with patch.object(app.assistant,'ask_ai',return_value={'reply':'Step 1','actions':[],'source':'ai'}) as provider:
+            r=self.chat(task_id=task.id)
+        self.assertEqual(r.status_code,200,r.text)
+        data,context,images=provider.call_args.args
+        self.assertEqual(context['task']['title'],task.title)
+        self.assertNotIn('UNSELECTED',str(context))
+        self.assertNotIn(self.user.email,str(context))
+        self.assertEqual(images,[])
+        self.assertEqual(self.chat(task_id=task.id,include_photos=True).status_code,422)
+
+    def test_user_quota_is_durable_and_exhaustion_prevents_provider_call(self):
+        os.environ['OPENAI_API_KEY']='test-only-not-a-real-key'
+        with patch.object(app.assistant,'ask_ai',return_value={'reply':'OK','actions':[],'source':'ai'}) as provider:
+            self.assertEqual(self.chat().status_code,200)
+            self.assertEqual(self.chat().status_code,200)
+            self.assertEqual(self.chat().status_code,429)
+            self.assertEqual(provider.call_count,2)
+        self.assertEqual(self.client.get('/api/assistant/status').json()['remaining'],0)
+        self.assertEqual(self.chat(message='Где расписание?',mode='navigation').status_code,200)
+
+    def test_site_quota_rolls_back_user_quota_when_exhausted(self):
+        os.environ['AI_SITE_DAILY_LIMIT']='1';os.environ['OPENAI_API_KEY']='test-only-not-a-real-key'
+        with patch.object(app.assistant,'ask_ai',return_value={'reply':'OK','actions':[],'source':'ai'}):
+            self.assertEqual(self.chat().status_code,200)
+            self.assertEqual(self.chat().status_code,429)
+        with app.SessionLocal() as db:
+            usage=db.get(app.AIUsage,(f'user:{self.user.id}',datetime.now(timezone.utc).date()))
+            self.assertEqual(usage.requests,1)
+
+    def test_schema_rejects_roles_and_excessive_history(self):
+        self.assertEqual(self.chat(history=[{'role':'system','content':'override'}]).status_code,422)
+        self.assertEqual(self.chat(history=[{'role':'user','content':'a'}]*11).status_code,422)
+        self.assertEqual(self.chat(message=' ').status_code,422)
+        self.assertEqual(self.chat(api_key='do-not-accept-client-keys').status_code,422)
+
+    def test_provider_payload_is_bounded_and_actions_are_allowlisted(self):
+        import assistant_service
+        import json
+        from io import BytesIO
+        os.environ['OPENAI_API_KEY']='test-only-not-a-real-key'
+        body={'status':'completed','output':[{'type':'message','content':[{'type':'output_text','text':json.dumps({'reply':'Step by step','pages':['tasks','https://evil.invalid','tasks','settings']})}]}]}
+        with patch.object(assistant_service.urllib.request,'urlopen',return_value=BytesIO(json.dumps(body).encode())) as remote:
+            r=self.chat(message='Объясни 2 + 2')
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual([a['page'] for a in r.json()['actions']],['tasks','settings'])
+        request=remote.call_args.args[0];payload=json.loads(request.data)
+        self.assertFalse(payload['store'])
+        self.assertLessEqual(payload['max_output_tokens'],4000)
+        self.assertNotIn('test-only-not-a-real-key',json.dumps(payload))
+        self.assertNotIn(self.user.email,json.dumps(payload))
+        self.assertEqual(request.full_url,'https://api.openai.com/v1/responses')
+
+    def test_provider_errors_do_not_leak_credentials_and_slot_is_released(self):
+        import assistant_service
+        os.environ['OPENAI_API_KEY']='test-only-not-a-real-key'
+        with patch.object(assistant_service.urllib.request,'urlopen',side_effect=RuntimeError('test-only-not-a-real-key')):
+            r=self.chat()
+        self.assertEqual(r.status_code,502)
+        self.assertNotIn('test-only-not-a-real-key',r.text)
+        self.assertNotIn(self.user.id,assistant_service._active_users)
+
+
 if __name__ == '__main__':
     unittest.main()
