@@ -47,7 +47,8 @@ def tg(method, params=None, timeout=35):
 
 def keyboard(rows=None):
     rows=[[dict(button, style='primary') for button in row] for row in (rows or [])]
-    rows.append([{'text':'🌐 My-Study 2.1','url':SITE,'style':'primary'}])
+    rows.append([{'text':'🚀 Открыть My-Study','web_app':{'url':SITE},'style':'primary'}])
+    rows.append([{'text':'🌐 Открыть в браузере','url':SITE,'style':'primary'}])
     return json.dumps({'inline_keyboard':rows},ensure_ascii=False)
 
 def send(chat,text,rows=None,message_id=None):
@@ -137,8 +138,8 @@ def display(chat,section='menu',message_id=None):
         wd=today.weekday()
         if section=='menu':
             if admin_authorized(chat):
-                return send_section(chat,section,'🛡 My-Study 2.1 — меню администратора',main_menu()+[[{'text':'🛡 Админ-панель','callback_data':'admin'}]],message_id)
-            return send_section(chat,section,'✦ My-Study 2.1\nТвоё пространство для учёбы и привычек\n\nВыбери, чем займёмся сегодня.',main_menu(),message_id)
+                return send_section(chat,section,'🛡 My-Study — меню администратора',main_menu()+[[{'text':'🛡 Админ-панель','callback_data':'admin'}]],message_id)
+            return send_section(chat,section,'✦ My-Study\nТвоё пространство для учёбы и привычек\n\nВыбери, чем займёмся сегодня.',main_menu(),message_id)
         if section=='today':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
@@ -585,7 +586,7 @@ def evening_summary(db,user,local):
     habits=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
     checks={c.habit_id for c in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
     pending=[h for h in habits if str(local.weekday()) in h.days.split(',') and h.id not in checks]
-    lines=[f'🌙 My-Study 2.1 · Вечерняя сводка',f'📅 Завтра, {tomorrow:%d.%m.%Y}', '\n🗓 Уроки']
+    lines=[f'🌙 My-Study · Вечерняя сводка',f'📅 Завтра, {tomorrow:%d.%m.%Y}', '\n🗓 Уроки']
     lines.extend([f'{l.period}. {l.subject} · {l.start or "время не указано"}' for l in lessons] or ['Уроков нет.'])
     lines.append('\n📚 Домашнее задание')
     lines.extend([task_text(t)+'\n' for t in tasks] or ['На завтра заданий нет.'])
@@ -694,6 +695,9 @@ def in_quiet(now,start,end):
 
 def main():
     if not TOKEN:print('TELEGRAM_BOT_TOKEN is missing',flush=True);return
+    try:
+        tg('setChatMenuButton',{'menu_button':json.dumps({'type':'web_app','text':'My-Study','web_app':{'url':SITE}},ensure_ascii=False)},timeout=10)
+    except Exception:print('Could not configure Mini App menu; retry on next restart',flush=True)
     print('StudyFlow Telegram bot running',flush=True)
     offset=0;last_tick=0
     try: tg('deleteWebhook',{'drop_pending_updates':'false'},timeout=10)
