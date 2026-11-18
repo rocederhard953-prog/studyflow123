@@ -289,6 +289,39 @@ def save_habit_note(d:dict,user:User=Depends(current_user),db:Session=Depends(db
     elif row: db.delete(row)
     db.commit(); return {'ok':True}
 
+@app.get('/api/whiteboard')
+def get_whiteboard(task_id:int|None=None,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    if task_id is not None: owned(db,Task,task_id,user)
+    row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='whiteboard:'+str(task_id or 'personal')))
+    return json.loads(row.value) if row else {'revision':0,'strokes':[]}
+
+@app.put('/api/whiteboard')
+def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    if task_id is not None: owned(db,Task,task_id,user)
+    strokes=d.get('strokes'); revision=d.get('revision')
+    if not isinstance(strokes,list) or len(strokes)>1500 or type(revision) is not int or revision<0: raise HTTPException(422,'Некорректная доска')
+    total=0
+    for s in strokes:
+        if not isinstance(s,dict) or s.get('tool') not in ('pen','marker','line','eraser') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(s.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
+        width=s.get('width'); points=s.get('points')
+        if type(width) not in (int,float) or not 1<=width<=40 or not isinstance(points,list) or not 1<=len(points)<=4000: raise HTTPException(422,'Некорректная линия')
+        total+=len(points)
+        if total>40000: raise HTTPException(413,'Доска слишком большая. Экспортируй PNG и очисти её.')
+        for p in points:
+            if not isinstance(p,list) or len(p)!=2 or any(type(v) not in (int,float) for v in p) or not (0<=p[0]<=1600 and 0<=p[1]<=1000): raise HTTPException(422,'Некорректная координата')
+    key='whiteboard:'+str(task_id or 'personal'); row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key==key))
+    if (json.loads(row.value)['revision'] if row else 0)!=revision: raise HTTPException(409,'Доска изменена в другом окне. Экспортируй PNG и перезагрузи страницу.')
+    value=json.dumps({'revision':revision+1,'strokes':strokes},separators=(',',':'))
+    if len(value)>1000000: raise HTTPException(413,'Доска слишком большая')
+    if row:
+        count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).update({'value':value},synchronize_session=False)
+        if count!=1: db.rollback(); raise HTTPException(409,'Доска изменена в другом окне')
+    else: db.add(UserSetting(user_id=user.id,key=key,value=value))
+    try: db.commit()
+    except IntegrityError: db.rollback(); raise HTTPException(409,'Доска изменена в другом окне') from None
+    return {'revision':revision+1}
+
+
 @app.get('/api/tasks')
 def list_tasks(user:User=Depends(current_user),db:Session=Depends(dbdep)):
     ts=db.scalars(select(Task).where(Task.user_id==user.id).order_by(Task.done,Task.due,Task.id.desc())).all()

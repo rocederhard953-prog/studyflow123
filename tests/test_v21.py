@@ -164,12 +164,36 @@ class V21Tests(unittest.TestCase):
             self.assertEqual(client.get('/').status_code,200)
 
 
+    def test_whiteboard_roundtrip_conflict_validation_and_ownership(self):
+        app.app.dependency_overrides[app.current_user]=lambda:self.user
+        try:
+            with TestClient(app.app) as client:
+                client.cookies.set('sf_csrf','board-test')
+                headers={'X-CSRF-Token':'board-test'}
+                data={'revision':0,'strokes':[{'tool':'pen','color':'#182033','width':4,'points':[[10,20],[30,40]]}]}
+                self.assertEqual(client.get('/api/whiteboard').json(),{'revision':0,'strokes':[]})
+                self.assertEqual(client.put('/api/whiteboard',json=data).status_code,403)
+                self.assertEqual(client.put('/api/whiteboard',json=data,headers=headers).status_code,200)
+                self.assertEqual(client.get('/api/whiteboard').json()['strokes'],data['strokes'])
+                self.assertEqual(client.put('/api/whiteboard',json=data,headers=headers).status_code,409)
+                bad={'revision':1,'strokes':[{'tool':'pen','color':'invalid','width':4,'points':[[10,20]]}]}
+                self.assertEqual(client.put('/api/whiteboard',json=bad,headers=headers).status_code,422)
+                task=self.task()
+                self.assertEqual(client.put('/api/whiteboard?task_id='+str(task.id),json=data,headers=headers).status_code,200)
+                app.app.dependency_overrides[app.current_user]=lambda:self.other
+                self.assertEqual(client.get('/api/whiteboard').json()['strokes'],[])
+                self.assertEqual(client.get('/api/whiteboard?task_id='+str(task.id)).status_code,404)
+                self.assertEqual(client.put('/api/whiteboard?task_id='+str(task.id),json=data,headers=headers).status_code,404)
+        finally:
+            app.app.dependency_overrides.pop(app.current_user,None)
+
+
 class AssistantTests(unittest.TestCase):
     task = V21Tests.task
 
     def setUp(self):
         V21Tests.setUp(self)
-        self.env = patch.dict(os.environ, {'OPENAI_API_KEY':'', 'AI_ENABLED':'1', 'AI_USER_DAILY_LIMIT':'2', 'AI_SITE_DAILY_LIMIT':'4'})
+        self.env = patch.dict(os.environ, {'AI_PROVIDER':'openai','OPENAI_API_KEY':'','GEMINI_API_KEY':'','GEMINI_MODEL':'gemini-3.5-flash-lite', 'AI_ENABLED':'1', 'AI_USER_DAILY_LIMIT':'2', 'AI_SITE_DAILY_LIMIT':'4'})
         self.env.start()
         self.addCleanup(self.env.stop)
         app.app.dependency_overrides[app.current_user] = lambda: self.user
@@ -285,6 +309,92 @@ class AssistantTests(unittest.TestCase):
         self.assertEqual(r.status_code,502)
         self.assertNotIn('test-only-not-a-real-key',r.text)
         self.assertNotIn(self.user.id,assistant_service._active_users)
+
+
+class GeminiTests(unittest.TestCase):
+    def setUp(self):
+        AssistantTests.setUp(self)
+        os.environ['AI_PROVIDER']='gemini'
+
+    chat=AssistantTests.chat
+    task=V21Tests.task
+
+    def gemini_response(self,reply='Разберём по шагам',pages=None,finish='STOP'):
+        from io import BytesIO
+        import json
+        return BytesIO(json.dumps({'candidates':[{'finishReason':finish,'content':{'parts':[{'thought':True,'text':'INTERNAL THOUGHT'},{'text':json.dumps({'reply':reply,'pages':pages or []})}]}}]}).encode())
+
+    def test_default_provider_and_no_paid_fallback_when_gemini_key_is_missing(self):
+        os.environ.pop('AI_PROVIDER',None)
+        os.environ['OPENAI_API_KEY']='available-openai-key-that-must-not-be-used'
+        self.assertEqual(app.assistant.ai_provider(),'gemini')
+        with patch.object(app.assistant,'ask_openai') as paid:
+            self.assertEqual(self.chat().status_code,503)
+        paid.assert_not_called()
+        status=self.client.get('/api/assistant/status').json()
+        self.assertFalse(status['ai_ready'])
+        self.assertEqual(status['provider'],'gemini')
+        self.assertTrue(status['privacy_notice'])
+
+    def test_gemini_uses_header_secret_schema_and_maps_history_roles(self):
+        import json
+        os.environ['GEMINI_API_KEY']='fake-gemini-test-key'
+        with patch.object(app.assistant.urllib.request,'urlopen',return_value=self.gemini_response(pages=['habits','https://evil.invalid','habits'])) as remote:
+            r=self.chat(message='Объясни сложение',history=[{'role':'user','content':'Первый вопрос'},{'role':'assistant','content':'Первый ответ'}])
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual([a['page'] for a in r.json()['actions']],['habits'])
+        self.assertNotIn('INTERNAL THOUGHT',r.text)
+        req=remote.call_args.args[0];payload=json.loads(req.data)
+        self.assertEqual(req.full_url,'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent')
+        self.assertNotIn('fake-gemini-test-key',req.full_url)
+        self.assertNotIn('fake-gemini-test-key',json.dumps(payload))
+        self.assertEqual({k.lower():v for k,v in req.header_items()}['x-goog-api-key'],'fake-gemini-test-key')
+        self.assertEqual([x['role'] for x in payload['contents']],['user','model','user'])
+        self.assertEqual(payload['generationConfig']['responseMimeType'],'application/json')
+        self.assertIn('responseJsonSchema',payload['generationConfig'])
+        self.assertNotIn('tools',payload)
+
+    def test_gemini_quota_error_does_not_retry_or_switch_provider(self):
+        import urllib.error
+        os.environ['GEMINI_API_KEY']='fake-gemini-test-key';os.environ['OPENAI_API_KEY']='do-not-use'
+        failure=urllib.error.HTTPError('https://generativelanguage.googleapis.com/',429,'fake-gemini-test-key',None,None)
+        with patch.object(app.assistant.urllib.request,'urlopen',side_effect=failure) as remote,patch.object(app.assistant,'ask_openai') as paid:
+            r=self.chat()
+        self.assertEqual(r.status_code,503)
+        self.assertEqual(remote.call_count,1)
+        self.assertNotIn('fake-gemini-test-key',r.text)
+        paid.assert_not_called()
+
+    def test_gemini_rejects_partial_response_and_non_free_model(self):
+        os.environ['GEMINI_API_KEY']='fake-gemini-test-key'
+        with patch.object(app.assistant.urllib.request,'urlopen',return_value=self.gemini_response(finish='MAX_TOKENS')):
+            self.assertEqual(self.chat().status_code,502)
+        os.environ['GEMINI_MODEL']='a-paid-model'
+        with patch.object(app.assistant.urllib.request,'urlopen') as remote:
+            self.assertEqual(self.chat().status_code,503)
+        remote.assert_not_called()
+
+    def test_gemini_accepts_only_inline_owned_photo_payloads(self):
+        import json
+        os.environ['GEMINI_API_KEY']='fake-gemini-test-key'
+        data=app.assistant.AssistantRequest(message='Объясни условие')
+        with patch.object(app.assistant.urllib.request,'urlopen',return_value=self.gemini_response()) as remote:
+            result=app.assistant.ask_ai(data,{'current_page':'tasks'},['data:image/png;base64,aGVsbG8='])
+        self.assertEqual(result['source'],'ai')
+        body=json.loads(remote.call_args.args[0].data)
+        self.assertEqual(body['contents'][-1]['parts'][1],{'inlineData':{'mimeType':'image/png','data':'aGVsbG8='}})
+        with patch.object(app.assistant.urllib.request,'urlopen') as remote:
+            with self.assertRaises(app.HTTPException):app.assistant.ask_ai(data,{},['https://private.invalid/image.jpg'])
+        remote.assert_not_called()
+
+    def test_gemini_region_denial_is_clear_and_does_not_leak_provider_body(self):
+        import urllib.error
+        os.environ['GEMINI_API_KEY']='fake-gemini-test-key'
+        with patch.object(app.assistant.urllib.request,'urlopen',side_effect=urllib.error.HTTPError('url',403,'secret provider details',None,None)):
+            response=self.chat()
+        self.assertEqual(response.status_code,503)
+        self.assertIn('Google AI Studio',response.json()['detail'])
+        self.assertNotIn('secret provider details',response.text)
 
 
 if __name__ == '__main__':
