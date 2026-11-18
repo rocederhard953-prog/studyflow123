@@ -45,3 +45,6 @@ button:disabled{filter:none!important;cursor:default;opacity:.4}
 :focus-visible{outline-color:var(--theme-accent)!important}::selection{background:var(--theme-accent);color:var(--on-accent)}
 @media(max-width:1200px){.theme-gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}}
 @media(max-width:760px){.theme-gallery{grid-template-columns:1fr;gap:16px}.appearance-hero{padding:8px 0 23px}.appearance-hero h2{font-size:26px}.appearance-hero p{font-size:10px}.theme-window-body{min-height:155px;grid-template-columns:42px 1fr}.theme-card p{font-size:10px}.theme-card-copy{padding:17px 10px 12px}.appearance-note{font-size:9px}.theme-card h3{font-size:15px}.theme-selected-label{font-size:9px}}
+
+/* Keep the account panel visible while navigation scrolls on small windows. */
+.sidebar{min-height:0}.sidebar nav{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;align-content:start}.sidebar .sidebar-bottom{flex-shrink:0;background:transparent}.sidebar .user-mini{min-width:0}.sidebar .avatar,.sidebar #logout{flex-shrink:0}.sidebar .user-meta{min-width:0;flex:1}.sidebar .user-meta small{white-space:normal;overflow-wrap:anywhere;line-height:1.5}.sidebar .user-meta b{overflow-wrap:anywhere}
