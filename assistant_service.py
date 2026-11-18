@@ -52,8 +52,20 @@ def positive_setting(name, default, maximum):
         return default
 
 
+def ai_provider():
+    return os.getenv('AI_PROVIDER', 'gemini').strip().lower()
+
+
 def ai_configured():
-    return os.getenv('AI_ENABLED', '1') == '1' and bool(os.getenv('OPENAI_API_KEY', '').strip())
+    provider=ai_provider()
+    key_name={'gemini':'GEMINI_API_KEY','openai':'OPENAI_API_KEY'}.get(provider)
+    return os.getenv('AI_ENABLED', '1') == '1' and bool(key_name and os.getenv(key_name, '').strip())
+
+
+def provider_notice():
+    if ai_provider()=='gemini':
+        return 'На бесплатном тарифе Gemini Google может использовать вопросы, фото и ответы для улучшения своих продуктов. Не отправляй личные или конфиденциальные данные.'
+    return ''
 
 
 def action(page):
@@ -121,6 +133,79 @@ def release_slot(user_id):
 
 
 def ask_ai(data, context, images):
+    # No paid fallback: a missing/exhausted Gemini key never invokes OpenAI.
+    if not ai_configured():
+        raise HTTPException(503, 'Помощь по ДЗ ещё не подключена. Навигация по сайту уже работает.')
+    if ai_provider()=='gemini':
+        return ask_gemini(data,context,images)
+    return ask_openai(data,context,images)
+
+
+def validated_reply(parsed):
+    if not isinstance(parsed,dict):raise ValueError('Invalid reply object')
+    reply=parsed.get('reply')
+    if not isinstance(reply,str) or not reply.strip() or len(reply)>16000:
+        raise ValueError('Invalid reply')
+    pages=parsed.get('pages',[])
+    if not isinstance(pages,list):pages=[]
+    allowed=list(dict.fromkeys(p for p in pages if isinstance(p,str) and p in PAGES))[:3]
+    return {'reply':reply.strip(),'actions':[action(p) for p in allowed],'source':'ai'}
+
+
+def ask_gemini(data,context,images):
+    model=os.getenv('GEMINI_MODEL','gemini-3.5-flash-lite').strip()
+    if model!='gemini-3.5-flash-lite':
+        raise HTTPException(503,'Для бесплатной конфигурации выбери gemini-3.5-flash-lite в настройках хостинга.')
+    contents=[{'role':'model' if x.role=='assistant' else 'user','parts':[{'text':x.content}]} for x in data.history]
+    parts=[{'text':json.dumps({'question':data.message,'context':context},ensure_ascii=False)}]
+    for image in images:
+        match=re.fullmatch(r'data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})',image)
+        if not match:raise HTTPException(422,'Некорректная фотография задания.')
+        parts.append({'inlineData':{'mimeType':match.group(1),'data':match.group(2)}})
+    contents.append({'role':'user','parts':parts})
+    payload={
+        'systemInstruction':{'parts':[{'text':SYSTEM_PROMPT+'\nРазделы сайта: '+json.dumps(PAGES,ensure_ascii=False)}]},
+        'contents':contents,
+        'generationConfig':{
+            'maxOutputTokens':positive_setting('AI_MAX_OUTPUT_TOKENS',1800,4000),
+            'responseMimeType':'application/json',
+            'responseJsonSchema':{'type':'object','properties':{
+                'reply':{'type':'string'},'pages':{'type':'array','items':{'type':'string','enum':list(PAGES)}}},
+                'required':['reply','pages'],'additionalProperties':False},
+        },
+    }
+    request=urllib.request.Request(
+        f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        data=json.dumps(payload).encode(),headers={
+            'x-goog-api-key':os.environ['GEMINI_API_KEY'].strip(),'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(request,timeout=45) as response:raw=response.read(256*1024+1)
+        if len(raw)>256*1024:raise ValueError('Oversize response')
+        result=json.loads(raw)
+        if result.get('promptFeedback',{}).get('blockReason'):
+            return {'reply':'Не могу ответить на этот запрос. Попробуй задать другой учебный вопрос.','actions':[],'source':'ai'}
+        candidates=result.get('candidates',[])
+        if not candidates:raise ValueError('Empty candidates')
+        candidate=candidates[0]
+        reason=candidate.get('finishReason')
+        if reason in ('SAFETY','PROHIBITED_CONTENT','BLOCKLIST','RECITATION','SPII','IMAGE_SAFETY'):
+            return {'reply':'Не могу ответить на этот запрос. Попробуй задать другой учебный вопрос.','actions':[],'source':'ai'}
+        if reason!='STOP':
+            raise HTTPException(502,'Ответ Gemini не завершён. Попробуй задать более короткий вопрос.')
+        text=''.join(p.get('text','') for p in candidate.get('content',{}).get('parts',[]) if not p.get('thought'))
+        return validated_reply(json.loads(text))
+    except urllib.error.HTTPError as exc:
+        if exc.code==429:
+            raise HTTPException(503,'Лимит Gemini исчерпан или сервис перегружен. Попробуй позже. Платный API автоматически не подключается.') from None
+        if exc.code in (401,403):
+            raise HTTPException(503,'Gemini недоступен для этого ключа, проекта или региона. Проверь доступ в Google AI Studio.') from None
+        raise HTTPException(502,'Не удалось получить ответ Gemini. Попробуй позже.') from None
+    except HTTPException:raise
+    except Exception:
+        raise HTTPException(502,'Не удалось получить ответ Gemini. Попробуй позже.') from None
+
+
+def ask_openai(data, context, images):
     if not ai_configured():
         raise HTTPException(503, 'Помощь по ДЗ ещё не подключена. Навигация по сайту уже работает.')
     schema = {'type': 'object', 'properties': {
@@ -154,14 +239,7 @@ def ask_ai(data, context, images):
         if any(c.get('type') == 'refusal' for c in parts):
             return {'reply': 'Не могу помочь с этим запросом. Попробуй задать вопрос по учебной теме или по работе сайта.', 'actions': [], 'source': 'ai'}
         parsed = json.loads(''.join(c.get('text', '') for c in parts if c.get('type') == 'output_text'))
-        reply = parsed.get('reply')
-        if not isinstance(reply, str) or not reply.strip() or len(reply) > 16000:
-            raise ValueError('Invalid reply')
-        pages = parsed.get('pages', [])
-        if not isinstance(pages, list):
-            pages = []
-        allowed = list(dict.fromkeys(p for p in pages if isinstance(p, str) and p in PAGES))[:3]
-        return {'reply': reply.strip(), 'actions': [action(p) for p in allowed], 'source': 'ai'}
+        return validated_reply(parsed)
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             raise HTTPException(503, 'ИИ сейчас недоступен: проверь лимит или баланс сервиса. Навигация по сайту работает.') from None

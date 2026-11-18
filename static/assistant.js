@@ -29,7 +29,7 @@ async function assistantPage(){
   <aside class="ai-context"><div class="card"><h3>С чем помочь?</h3><div class="ai-mode-switch" role="group" aria-label="Режим помощника"><button data-ai-mode="study">📚 С учёбой</button><button data-ai-mode="navigation">◈ По сайту</button></div><p class="ai-mode-description" id="aiModeDescription"></p><div id="aiSetupNotice" class="ai-setup ${status.ai_ready?'hidden':''}">Объяснение ДЗ появится после подключения ИИ владельцем сайта. Пока можешь спрашивать, где находятся нужные функции.</div></div>
   <div class="card" id="aiTaskContext"><h3>Задание для разбора</h3><label for="aiTaskSelect">Выбери своё ДЗ</label><select id="aiTaskSelect"><option value="">Без выбранного задания</option>${tasks.filter(t=>!t.done||t.id===ai.taskId).map(t=>`<option value="${t.id}" ${t.id===ai.taskId?'selected':''}>${esc(t.subject||'Без предмета')} · ${esc(t.title)}</option>`).join('')}</select><div id="aiTaskPreview" class="ai-task-preview"></div><label class="ai-photo-option"><input id="aiPhotos" type="checkbox" ${ai.photos?'checked':''}>Передать фото выбранного задания</label><p class="ai-context-note">В ИИ отправится вопрос, история этого диалога и только выбранное задание. Фото — по твоему выбору, до двух, JPG/PNG/WEBP, до 4 МБ каждое.</p></div>
   <div class="card"><h3>Попробуй спросить</h3><div id="aiSuggestions" class="ai-suggestions"></div></div>
-  <div class="ai-limit" id="aiLimit"></div></aside></div>`;
+  ${status.privacy_notice?`<div class="ai-setup">${esc(status.privacy_notice)}</div>`:''}<div class="ai-limit" id="aiLimit"></div></aside></div>`;
 }
 
 function bindAssistant(){
