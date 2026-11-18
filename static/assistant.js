@@ -54,14 +54,14 @@ function updateAssistantContext(){
   if(page!=='assistant'||!document.getElementById('aiForm'))return;
   document.querySelectorAll('[data-ai-mode]').forEach(b=>{const active=b.dataset.aiMode===ai.mode;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
   const study=ai.mode==='study';
-  document.getElementById('aiModeDescription').textContent=study?'Разберём условие, объясним тему и проверим решение по шагам.':'Подскажу, где что находится, и предложу кнопку перехода.';
+  document.getElementById('aiModeDescription').textContent=study?'Решу задание с ответом, объясню тему на примере или проверю твою работу.':'Подскажу, где что находится, и предложу кнопку перехода.';
   document.getElementById('aiTaskContext').classList.toggle('hidden',!study);
   const task=ai.tasks.find(t=>t.id===ai.taskId);
   document.getElementById('aiTaskPreview').textContent=task?`${task.subject||'Без предмета'}${task.due?' · к '+fmt(task.due):''}\n${task.title}${task.description?'\n'+task.description:''}`:'Можно задать вопрос без привязки к ДЗ.';
   const photos=document.getElementById('aiPhotos');photos.disabled=!task?.attachments?.length||ai.busy;
   if(photos.disabled){photos.checked=false;ai.photos=false;}
   document.getElementById('aiTaskSelect').disabled=ai.busy;
-  const suggestions=study?['Помоги понять условие задания','Объясни решение по шагам','Проверь моё решение']:['Где добавить домашнее задание?','Как привязать Telegram?','Как изменить время вечерней сводки?'];
+  const suggestions=study?['Реши выбранное задание полностью и дай ответ','Объясни тему и разбери пример','Проверь моё решение']:['Где добавить домашнее задание?','Как привязать Telegram?','Как изменить время вечерней сводки?'];
   const list=document.getElementById('aiSuggestions');list.replaceChildren();
   for(const text of suggestions){const b=document.createElement('button');b.textContent=text;b.type='button';b.onclick=()=>{document.getElementById('aiInput').value=text;document.getElementById('aiInput').focus();};list.append(b);}
   document.getElementById('aiSend').disabled=ai.busy||(study&&!ai.status?.ai_ready);

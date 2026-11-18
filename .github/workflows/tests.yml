@@ -15,3 +15,10 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: node --check static/app.js
       - run: node --check static/assistant.js
+      - run: node --check static/habits.js
+      - run: node --check static/themes.js
+      - run: node --test tests/habits-core.test.cjs
+      - run: node --check static/whiteboard.js
+      - run: node --test tests/whiteboard.test.cjs
+      - run: node --check static/quick-updates.js
+      - run: node --test tests/quick-updates.test.cjs

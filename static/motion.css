@@ -1,0 +1,23 @@
+/* Short, consistent motion. Content changes never wait for an animation. */
+:root{--motion-fast:120ms;--motion-normal:190ms;--motion-ease:cubic-bezier(.2,.65,.3,1)}
+.content,.habit-day-panel{animation:none}
+.sidebar,.card,.stat-card{backdrop-filter:none}
+button,a,input,textarea,select{transition:background-color var(--motion-fast) ease,border-color var(--motion-fast) ease,color var(--motion-fast) ease,box-shadow var(--motion-fast) ease,transform var(--motion-fast) var(--motion-ease)}
+button:active{transform:translateY(1px) scale(.98)}
+button:disabled{cursor:default;transform:none}
+.nav-item.active,.mobile-nav button.active{transition:background-color var(--motion-normal) ease,color var(--motion-normal) ease,box-shadow var(--motion-normal) ease}
+.progress span,.bar span{transition:width 220ms var(--motion-ease)}
+.check{transition:background-color var(--motion-fast),border-color var(--motion-fast)}
+.toast{transition:opacity 160ms ease,transform 160ms var(--motion-ease)}
+.modal-wrap:not(.hidden) .modal{animation:motion-dialog 180ms var(--motion-ease)}
+.modal-wrap{backdrop-filter:blur(4px)}
+.theme-card,.habit-template{transition:transform var(--motion-normal) var(--motion-ease),border-color var(--motion-normal),box-shadow var(--motion-normal)}
+.task-is-done .grow>b,.task-is-done>.row .row>div>b{color:var(--muted);text-decoration:line-through}
+.loading-state{color:var(--muted);animation:motion-loading 1200ms ease-in-out infinite}
+#content[aria-busy="true"]{pointer-events:none}
+.wb-status{transition:color var(--motion-fast)}
+@keyframes motion-dialog{from{opacity:0;transform:translateY(8px) scale(.99)}to{opacity:1;transform:none}}
+@keyframes motion-loading{50%{opacity:.55}}
+@media(hover:hover) and (pointer:fine){.theme-card:hover,.habit-template:hover{transform:translateY(-2px)}.primary:hover,.secondary:hover,.ghost:hover,.icon-btn:hover{transform:translateY(-1px)}}
+@media(hover:none){button:hover,.theme-card:hover,.habit-template:hover{transform:none}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

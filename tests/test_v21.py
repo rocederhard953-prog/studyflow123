@@ -188,6 +188,64 @@ class V21Tests(unittest.TestCase):
             app.app.dependency_overrides.pop(app.current_user,None)
 
 
+    def test_whiteboard_photos_persist_and_are_private(self):
+        import base64
+        raw=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+        app.app.dependency_overrides[app.current_user]=lambda:self.user
+        try:
+            with TestClient(app.app) as client:
+                client.cookies.set('sf_csrf','board-test');headers={'X-CSRF-Token':'board-test'}
+                self.assertEqual(client.post('/api/whiteboard/images',files={'file':('photo.png',raw,'image/png')}).status_code,403)
+                result=client.post('/api/whiteboard/images',files={'file':('photo.png',raw,'image/png')},headers=headers)
+                self.assertEqual(result.status_code,200,result.text)
+                stored=result.json()['stored_name']
+                self.assertEqual(client.get('/api/whiteboard/images/'+stored).content,raw)
+                data={'revision':0,'strokes':[],'grid':False,'images':[{'stored_name':stored,'x':100,'y':200,'w':500,'h':400}]}
+                self.assertEqual(client.put('/api/whiteboard',json=data,headers=headers).status_code,200)
+                saved=client.get('/api/whiteboard').json()
+                self.assertEqual(saved['images'],data['images']);self.assertFalse(saved['grid'])
+                app.app.dependency_overrides[app.current_user]=lambda:self.other
+                self.assertEqual(client.get('/api/whiteboard/images/'+stored).status_code,404)
+                self.assertEqual(client.put('/api/whiteboard',json=data,headers=headers).status_code,404)
+        finally: app.app.dependency_overrides.pop(app.current_user,None)
+
+    def test_whiteboard_photo_validation_and_legacy_board(self):
+        app.app.dependency_overrides[app.current_user]=lambda:self.user
+        try:
+            with TestClient(app.app) as client:
+                client.cookies.set('sf_csrf','board-test');headers={'X-CSRF-Token':'board-test'}
+                self.assertEqual(client.post('/api/whiteboard/images',files={'file':('x.svg',b'<svg/>','image/svg+xml')},headers=headers).status_code,415)
+                self.assertEqual(client.post('/api/whiteboard/images',files={'file':('x.png',b'not an image','image/png')},headers=headers).status_code,415)
+                self.assertEqual(client.put('/api/whiteboard',json={'revision':0,'strokes':[],'grid':'yes'},headers=headers).status_code,422)
+                self.assertEqual(client.put('/api/whiteboard',json={'revision':0,'strokes':[],'images':[{'stored_name':'https://external/image.png'}]},headers=headers).status_code,422)
+                self.assertEqual(client.put('/api/whiteboard',json={'revision':0,'strokes':[]},headers=headers).status_code,200)
+                saved=client.get('/api/whiteboard').json();self.assertTrue(saved['grid']);self.assertEqual(saved['images'],[])
+        finally: app.app.dependency_overrides.pop(app.current_user,None)
+
+
+    def test_homework_multiple_pages_and_personal_board_restriction(self):
+        app.app.dependency_overrides[app.current_user]=lambda:self.user
+        try:
+            task=self.task()
+            first={'strokes':[{'tool':'pen','color':'#182033','width':4,'points':[[10,20]]}],'images':[],'grid':True}
+            second={'strokes':[{'tool':'line','color':'#2374da','width':8,'points':[[50,60],[70,80]]}],'images':[],'grid':False}
+            data={'revision':0,'pages':[first,second]}
+            url='/api/whiteboard?task_id='+str(task.id)
+            with TestClient(app.app) as client:
+                client.cookies.set('sf_csrf','board-test');headers={'X-CSRF-Token':'board-test'}
+                self.assertEqual(client.put('/api/whiteboard',json=data,headers=headers).status_code,422)
+                self.assertEqual(client.put(url,json=data,headers=headers).status_code,200)
+                saved=client.get(url).json();self.assertEqual(saved['pages'],[first,second]);self.assertEqual(saved['strokes'],first['strokes'])
+                self.assertEqual(client.put(url,json={'revision':1,'strokes':[]},headers=headers).status_code,409)
+                self.assertEqual(client.put(url,json={'revision':1,'pages':[]},headers=headers).status_code,422)
+                self.assertEqual(client.put(url,json={'revision':1,'pages':[first]*21},headers=headers).status_code,422)
+                self.assertEqual(client.get(url).json()['pages'],[first,second])
+                app.app.dependency_overrides[app.current_user]=lambda:self.other
+                self.assertEqual(client.get(url).status_code,404)
+                self.assertEqual(client.put(url,json=data,headers=headers).status_code,404)
+        finally: app.app.dependency_overrides.pop(app.current_user,None)
+
+
 class AssistantTests(unittest.TestCase):
     task = V21Tests.task
 

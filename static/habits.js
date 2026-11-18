@@ -17,10 +17,13 @@ let habitView={tab:'mine',category:'all',selected:null,month:null,busy:false,ran
 function habitIcon(h){return HABIT_TEMPLATES.find(t=>t.name===h.name)?.icon||'✦';}
 function habitDayLabel(day){return new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric',timeZone:'UTC'});}
 function habitMonthLabel(month){return new Date(month+'-01T12:00:00Z').toLocaleDateString('ru-RU',{month:'long',year:'numeric',timeZone:'UTC'});}
-function shiftHabitMonth(offset){const d=HabitStats.parse(habitView.month+'-01');d.setUTCMonth(d.getUTCMonth()+offset);habitView.month=d.toISOString().slice(0,7);renderPage();}
+function shiftHabitMonth(offset){const d=HabitStats.parse(habitView.month+'-01');d.setUTCMonth(d.getUTCMonth()+offset);habitView.month=d.toISOString().slice(0,7);renderHabitsLocal();}
 
 async function habitsPage(){
   const [hs,notes]=await Promise.all([api('/habits'),api('/habit-notes')]);cache.habits=hs;habitView.notes=notes;
+  return renderHabitContent(hs);
+}
+function renderHabitContent(hs){
   const day=today();if(!habitView.month)habitView.month=day.slice(0,7);
   if(!habitView.day)habitView.day=day;
   if(!hs.some(h=>h.id===habitView.selected))habitView.selected=hs[0]?.id??null;
@@ -59,21 +62,31 @@ function habitChart(hs,day){
 }
 
 async function toggleHabitMark(id,day,checked){
-  if(habitView.busy)return;const h=cache.habits?.find(x=>x.id===Number(id));if(!h||day>today()||!HabitStats.scheduled(h,day))return;
-  habitView.busy=true;document.querySelectorAll('[data-habit-calendar],[data-habit-today]').forEach(b=>b.disabled=true);
-  try{await api('/habits/'+h.id+'/check',{method:'PUT',body:JSON.stringify({day,done:checked})});toast(checked?'Отметка сохранена':'Отметка снята');}catch(e){toast(e.message);}finally{habitView.busy=false;if(page==='habits')await renderPage();}
+ if(habitView.busy)return;const h=cache.habits?.find(x=>x.id===Number(id));if(!h||day>today()||!HabitStats.scheduled(h,day))return;
+ const user=me?.id;habitView.busy=true;document.querySelectorAll('[data-habit-calendar],[data-habit-today],[data-day-habit]').forEach(b=>b.disabled=true);
+ try{await api('/habits/'+h.id+'/check',{method:'PUT',body:JSON.stringify({day,done:checked})});if(me?.id!==user)return;h.checks=checked?[...new Set([...h.checks,day])]:h.checks.filter(d=>d!==day);toast(checked?'Отметка сохранена':'Отметка снята');}catch(e){toast(e.message);}finally{habitView.busy=false;if(page==='habits'&&me?.id===user)refreshHabitParts();}
 }
+function preserveHabitNote(){const note=document.querySelector('[data-day-note]');if(note&&habitView.day)habitView.notes[habitView.day]=note.value;}
+function refreshHabitParts(){
+ preserveHabitNote();const focus=document.activeElement;let selector=null;
+ for(const key of ['data-day-habit','data-habit-today','data-day-note'])if(focus?.hasAttribute?.(key)){selector=key==='data-day-note'?'[data-day-note]':'['+key+'="'+focus.getAttribute(key)+'"]';break;}
+ const selection=typeof focus?.selectionStart==='number'?[focus.selectionStart,focus.selectionEnd]:null;
+ const template=document.createElement('template');template.innerHTML=renderHabitContent(cache.habits||[]);
+ for(const cls of ['.habit-summary-grid','.habit-cards','.habit-chart','.habit-calendar','.habit-day-panel']){const old=document.querySelector('#content '+cls),fresh=template.content.querySelector(cls);if(old&&fresh)old.replaceChildren(...fresh.childNodes);}
+ bindCommon();if(selector){const next=document.querySelector(selector);next?.focus({preventScroll:true});if(selection&&next?.setSelectionRange)next.setSelectionRange(...selection);}
+}
+function renderHabitsLocal(preserve=true){if(preserve)preserveHabitNote();document.getElementById('content').innerHTML=renderHabitContent(cache.habits||[]);bindCommon();}
 
 function bindHabits(){
   if(page!=='habits')return;
-  document.querySelectorAll('[data-habit-tab]').forEach(b=>b.onclick=()=>{habitView.tab=b.dataset.habitTab;renderPage();});
-  document.querySelectorAll('[data-habit-category]').forEach(b=>b.onclick=()=>{habitView.category=b.dataset.habitCategory;renderPage();});
+  document.querySelectorAll('[data-habit-tab]').forEach(b=>b.onclick=()=>{habitView.tab=b.dataset.habitTab;renderHabitsLocal();});
+  document.querySelectorAll('[data-habit-category]').forEach(b=>b.onclick=()=>{habitView.category=b.dataset.habitCategory;renderHabitsLocal();});
   document.querySelectorAll('[data-habit-template]').forEach(b=>b.onclick=()=>{const t=HABIT_TEMPLATES[Number(b.dataset.habitTemplate)];if(t){newHabit();document.querySelector('#dynamicForm [name="name"]').value=t.name;}});
-  document.querySelectorAll('[data-habit-select]').forEach(b=>b.onclick=()=>{habitView.selected=Number(b.dataset.habitSelect);renderPage();});
+  document.querySelectorAll('[data-habit-select]').forEach(b=>b.onclick=()=>{habitView.selected=Number(b.dataset.habitSelect);renderHabitsLocal();});
   document.querySelectorAll('[data-habit-month]').forEach(b=>b.onclick=()=>shiftHabitMonth(Number(b.dataset.habitMonth)));
   document.querySelectorAll('[data-habit-today]').forEach(b=>b.onchange=()=>toggleHabitMark(b.dataset.habitToday,today(),b.checked));
-  document.querySelectorAll('[data-habit-calendar]').forEach(b=>b.onclick=()=>{habitView.day=b.dataset.habitCalendar;renderPage();});
+  document.querySelectorAll('[data-habit-calendar]').forEach(b=>b.onclick=()=>{preserveHabitNote();habitView.day=b.dataset.habitCalendar;renderHabitsLocal(false);});
   document.querySelectorAll('[data-day-habit]').forEach(b=>b.onchange=()=>toggleHabitMark(b.dataset.dayHabit,habitView.day,b.checked));
   document.querySelectorAll('[data-save-day-note]').forEach(b=>b.onclick=async()=>{const note=document.querySelector('[data-day-note]').value;try{await api('/habit-notes',{method:'PUT',body:JSON.stringify({day:b.dataset.saveDayNote,note})});habitView.notes[b.dataset.saveDayNote]=note;toast('Заметка сохранена');}catch(e){toast(e.message);}});
-  document.querySelectorAll('[data-habit-range]').forEach(b=>b.onclick=()=>{habitView.range=Number(b.dataset.habitRange);renderPage();});
+  document.querySelectorAll('[data-habit-range]').forEach(b=>b.onclick=()=>{habitView.range=Number(b.dataset.habitRange);renderHabitsLocal();});
 }

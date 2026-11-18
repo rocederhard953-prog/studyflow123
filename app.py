@@ -391,21 +391,48 @@ def get_whiteboard(task_id:int|None=None,user:User=Depends(current_user),db:Sess
 @app.put('/api/whiteboard')
 def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     if task_id is not None: owned(db,Task,task_id,user)
-    strokes=d.get('strokes'); revision=d.get('revision')
-    if not isinstance(strokes,list) or len(strokes)>1500 or type(revision) is not int or revision<0: raise HTTPException(422,'Некорректная доска')
-    total=0
-    for s in strokes:
-        if not isinstance(s,dict) or s.get('tool') not in ('pen','marker','line','eraser') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(s.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
-        width=s.get('width'); points=s.get('points')
-        if type(width) not in (int,float) or not 1<=width<=40 or not isinstance(points,list) or not 1<=len(points)<=4000: raise HTTPException(422,'Некорректная линия')
-        total+=len(points)
-        if total>40000: raise HTTPException(413,'Доска слишком большая. Экспортируй PNG и очисти её.')
-        for p in points:
-            if not isinstance(p,list) or len(p)!=2 or any(type(v) not in (int,float) for v in p) or not (0<=p[0]<=1600 and 0<=p[1]<=1000): raise HTTPException(422,'Некорректная координата')
+    revision=d.get('revision')
+    if type(revision) is not int or revision<0: raise HTTPException(422,'Некорректная версия доски')
+    def validate_page(data):
+        if not isinstance(data,dict): raise HTTPException(422,'Некорректный лист')
+        strokes=data.get('strokes'); images=data.get('images',[]); grid=data.get('grid',True)
+        if not isinstance(strokes,list) or len(strokes)>1500: raise HTTPException(422,'Некорректная доска')
+        total=0
+        for stroke in strokes:
+            if not isinstance(stroke,dict) or stroke.get('tool') not in ('pen','marker','line','eraser') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(stroke.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
+            width=stroke.get('width'); points=stroke.get('points')
+            if type(width) not in (int,float) or not 1<=width<=40 or not isinstance(points,list) or not 1<=len(points)<=4000: raise HTTPException(422,'Некорректная линия')
+            total+=len(points)
+            if total>40000: raise HTTPException(413,'Лист слишком большой. Экспортируй PNG и создай следующий.')
+            for point in points:
+                if not isinstance(point,list) or len(point)!=2 or any(type(v) not in (int,float) for v in point) or not (0<=point[0]<=1600 and 0<=point[1]<=1000): raise HTTPException(422,'Некорректная координата')
+        if not isinstance(images,list) or len(images)>8 or type(grid) is not bool: raise HTTPException(422,'Не более 8 фото на листе')
+        clean_images=[]
+        for image in images:
+            if not isinstance(image,dict): raise HTTPException(422,'Некорректное фото')
+            stored=image.get('stored_name','')
+            if not isinstance(stored,str) or not re.fullmatch(r'[a-f0-9]{32}\.(jpg|png|webp)',stored): raise HTTPException(422,'Некорректное фото')
+            asset=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='board-image:'+stored))
+            if not asset or not (UPLOAD_DIR/stored).is_file(): raise HTTPException(404,'Фото не найдено')
+            x,y,w,h=(image.get(k) for k in ('x','y','w','h'))
+            if any(type(v) not in (int,float) for v in (x,y,w,h)) or not (0<=x<=1560 and 0<=y<=960 and 40<=w<=1600 and 40<=h<=1000 and x+w<=1600.01 and y+h<=1000.01): raise HTTPException(422,'Фото выходит за границы доски')
+            clean_images.append({'stored_name':stored,'x':x,'y':y,'w':w,'h':h})
+        return {'strokes':strokes,'images':clean_images,'grid':grid}
+    pages=d.get('pages')
+    if pages is not None:
+        if task_id is None: raise HTTPException(422,'Несколько листов доступны только для ДЗ')
+        if not isinstance(pages,list) or not 1<=len(pages)<=20: raise HTTPException(422,'В доске ДЗ должно быть от 1 до 20 листов')
+        pages=[validate_page(p) for p in pages]
+        page=pages[0]
+    else: page=validate_page(d)
     key='whiteboard:'+str(task_id or 'personal'); row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key==key))
-    if (json.loads(row.value)['revision'] if row else 0)!=revision: raise HTTPException(409,'Доска изменена в другом окне. Экспортируй PNG и перезагрузи страницу.')
-    value=json.dumps({'revision':revision+1,'strokes':strokes},separators=(',',':'))
-    if len(value)>1000000: raise HTTPException(413,'Доска слишком большая')
+    old=json.loads(row.value) if row else {'revision':0}
+    if old['revision']!=revision: raise HTTPException(409,'Доска изменена в другом окне. Экспортируй PNG и перезагрузи страницу.')
+    if old.get('pages') and pages is None: raise HTTPException(409,'Обнови страницу для сохранения всех листов')
+    result={'revision':revision+1,**page}
+    if pages is not None: result['pages']=pages
+    value=json.dumps(result,separators=(',',':'))
+    if len(value)>(4000000 if task_id is not None else 1000000): raise HTTPException(413,'Доска слишком большая. Экспортируй PNG.')
     if row:
         count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).update({'value':value},synchronize_session=False)
         if count!=1: db.rollback(); raise HTTPException(409,'Доска изменена в другом окне')
@@ -448,6 +475,26 @@ async def store_image(file:UploadFile):
     if not signatures.get(mime,False): raise HTTPException(415,'Файл не соответствует типу изображения')
     ext={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','image/gif':'.gif'}[mime]; stored=uuid.uuid4().hex+ext
     (UPLOAD_DIR/stored).write_bytes(raw); return stored,mime,(file.filename or 'image'+ext)[:255]
+@app.post('/api/whiteboard/images')
+async def upload_whiteboard_image(file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    if file.content_type not in ('image/jpeg','image/png','image/webp'): raise HTTPException(415,'Разрешены JPG, PNG и WEBP')
+    if db.scalar(select(func.count()).select_from(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key.like('board-image:%')))>=200:
+        raise HTTPException(413,'Достигнут лимит изображений аккаунта (200)')
+    stored,mime,name=await store_image(file)
+    db.add(UserSetting(user_id=user.id,key='board-image:'+stored,value=json.dumps({'mime':mime,'filename':name})))
+    try: db.commit()
+    except Exception:
+        db.rollback();(UPLOAD_DIR/stored).unlink(missing_ok=True);raise
+    return {'stored_name':stored}
+
+@app.get('/api/whiteboard/images/{stored_name}')
+def whiteboard_image(stored_name:str,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    if not re.fullmatch(r'[a-f0-9]{32}\.(jpg|png|webp)',stored_name): raise HTTPException(404,'Фото не найдено')
+    row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='board-image:'+stored_name))
+    if not row or not (UPLOAD_DIR/stored_name).is_file(): raise HTTPException(404,'Фото не найдено')
+    return FileResponse(UPLOAD_DIR/stored_name,media_type=json.loads(row.value)['mime'],headers={'Cache-Control':'private, no-store'})
+
+
 @app.post('/api/tasks/{tid}/attachments')
 async def add_attachment(tid:int,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(dbdep)):
     owned(db,Task,tid,user); stored,mime,name=await store_image(file); a=Attachment(user_id=user.id,task_id=tid,stored_name=stored,mime=mime,filename=name); db.add(a); db.commit(); db.refresh(a); return serialize(a)
