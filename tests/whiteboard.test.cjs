@@ -5,7 +5,7 @@ function setup(){
  function canvas(){const ctx=new Proxy({},{get(o,k){if(k in o)return o[k];return (...args)=>logs.push([k,ctx.globalCompositeOperation,...args]);}});return {width:1600,height:1000,getContext:()=>ctx,getBoundingClientRect:()=>({left:0,top:0,width:1600,height:1000}),setPointerCapture(){},style:{}};}
  const surface=canvas(),nodes={wbCanvas:surface,wbWidth:{},wbWidthValue:{},wbStatus:{},wbPhotoFile:{},wbDropZone:{style:{},clientWidth:1600,clientHeight:1000,getBoundingClientRect:()=>({left:0,top:0,width:1600,height:1000}),setPointerCapture(){},addEventListener(name,fn){this[name]=fn;},classList:{add(){},remove(){}}}};
  const context=vm.createContext({page:'whiteboard',document:{addEventListener:(name,f)=>handlers[name]=f,querySelectorAll:()=>[],querySelector:()=>null,getElementById:id=>nodes[id]||null,createElement:name=>name==='canvas'?canvas():{}},window:{addEventListener:(n,f)=>windowHandlers[n]=f},confirm:()=>true,toast(){},setTimeout:f=>{timers.set(++timerId,f);return timerId;},clearTimeout:id=>timers.delete(id),requestAnimationFrame:f=>{f();return 0;},api:async()=>({revision:1})});
- vm.runInContext(source,context);
+ vm.runInContext(source,context);vm.runInContext('wb.view={zoom:1,x:0,y:0,w:1600,h:1000}',context);
  const run=code=>vm.runInContext(code,context);
  const key=(code,extra={})=>handlers.keydown({code,key:'',target:{tagName:'BODY'},preventDefault(){},...extra});
  const runTimer=()=>{const next=timers.entries().next().value;if(next){timers.delete(next[0]);next[1]();}};
@@ -26,7 +26,7 @@ test('photo moves and proportional resizing can be undone and redone',()=>{
  s.key('KeyZ',{ctrlKey:true});assert.equal(s.run('wb.images[0].w'),200);s.key('KeyZ',{ctrlKey:true,shiftKey:true});assert.equal(s.run('wb.images[0].w'),400);
 });
 test('resize stays on the board and preserves aspect ratio',()=>{
- const s=setup();const p=s.run('wbResizePhoto({x:1000,y:800,w:200,h:100},[4000,4000])');assert.ok(p.x+p.w<=1600.01);assert.ok(p.y+p.h<=1000.01);assert.equal(p.w/p.h,2);
+ const s=setup();const p=s.run('wbResizePhoto({x:1000,y:800,w:200,h:100},[4000,4000])');assert.ok(p.x+p.w<=12000.01);assert.ok(p.y+p.h<=8000.01);assert.equal(p.w/p.h,2);
 });
 test('eraser affects a separate ink layer, not the grid or photo',()=>{
  const s=setup();s.run("wb.images=[{stored_name:'photo',x:0,y:0,w:200,h:100}];wb.bitmaps.set('photo',{});wb.strokes=[{tool:'eraser',width:4,color:'#182033',points:[[10,10],[20,20]]}];wbDraw(true)");
@@ -42,19 +42,9 @@ test('paste accepts image files only outside text fields',()=>{
 test('saving includes images, strokes and the grid preference',async()=>{
  const s=setup();let payload;s.context.api=async(url,options)=>{payload=JSON.parse(options.body);return {revision:2};};s.run("wb.images=[{stored_name:'photo',x:0,y:0,w:200,h:100}];wb.grid=false;wb.dirty=true");await s.run("wbAction('save')");assert.equal(payload.images.length,1);assert.equal(payload.grid,false);assert.equal(s.run('wb.revision'),2);assert.equal(s.run('wb.dirty'),false);
 });
-test('homework pages keep separate drawings and photos when switching and saving',async()=>{
- const s=setup();s.context.renderPage=async()=>{};
- s.run("wb.task=7;wb.images=[{stored_name:'first-photo',x:0,y:0,w:200,h:100}];wb.strokes=[{tool:'pen',width:4,color:'#182033',points:[[10,10]]}];wb.pages=[wbSnapshot()];wbChangePage('new')");
- assert.equal(s.run('wb.pages.length'),2);assert.equal(s.run('wb.images.length'),0);assert.equal(s.run('wb.strokes.length'),0);
- s.run("wb.strokes=[{tool:'pen',width:4,color:'#182033',points:[[20,20]]}];wbChanged();wbChangePage(0)");
- assert.equal(s.run('wb.images[0].stored_name'),'first-photo');assert.equal(s.run('wb.strokes[0].points[0][0]'),10);
- s.run('wbChangePage(1)');assert.equal(s.run('wb.strokes[0].points[0][0]'),20);
- let payload;s.context.api=async(url,options)=>{payload=JSON.parse(options.body);return {revision:1};};await s.run("wbAction('save')");assert.equal(payload.pages.length,2);assert.equal(payload.pages[0].images[0].stored_name,'first-photo');assert.equal(payload.pages[1].strokes[0].points[0][0],20);
-});
-test('personal board cannot create pages and Shift F is homework-only',()=>{
- const s=setup();s.context.renderPage=async()=>{};s.run("wbChangePage('new')");assert.equal(s.run('wb.pages'),null);
- s.run('wb.task=7;wb.pages=[wbSnapshot()]');s.key('KeyF',{shiftKey:true});assert.equal(s.run('wb.pages.length'),2);
-});
+test('legacy homework sheets merge into one large world without losing drawings or photos',async()=>{const s=setup();s.run("Object.assign(wb,wbImportDocument({pages:[{strokes:[{tool:'pen',width:4,color:'#111111',points:[[10,10]]}],images:[],grid:true},{strokes:[],images:[{stored_name:'photo',x:100,y:200,w:200,h:100}]}]}));wb.dirty=true");assert.equal(s.run('wb.strokes[0].points[0][0]'),10);assert.equal(s.run('wb.images[0].x'),2100);let payload;s.context.api=async(u,o)=>{payload=JSON.parse(o.body);return {revision:1};};await s.run("wbAction('save')");assert.equal(payload.layout,'large-v1');assert.equal(payload.pages,undefined);assert.equal(payload.images.length,1);});
+test('single world has no sheet creation and drawing canvas stays viewport sized',()=>{const s=setup();assert.equal(s.run('typeof wbChangePage'),'undefined');s.run('wbFitView();wbDraw()');assert.equal(s.surface.width,1600);assert.equal(s.surface.height,1000);assert.ok(s.run('wb.view.zoom')<1);s.key('Home');assert.equal(s.run('wb.view.zoom'),1);});
+
 test('autosave combines rapid actions and queues edits made during a save',async()=>{
  const s=setup(),payloads=[];let resolveFirst;
  s.context.api=async(url,options)=>{payloads.push(JSON.parse(options.body));if(payloads.length===1)return new Promise(r=>resolveFirst=r);return {revision:2};};
@@ -91,7 +81,7 @@ test('hand panning, wheel scrolling and zoom do not draw or autosave',()=>{
  s.zone.onpointerdown(event(300,300));s.zone.onpointermove(event(340,320));s.zone.onpointerup(event(340,320));
  assert.equal(s.run('wb.view.x'),40);assert.equal(s.run('wb.view.y'),20);assert.equal(s.run('wb.strokes.length'),0);assert.equal(s.run('wb.dirty'),false);
  let prevented=false;s.zone.wheel({deltaX:5,deltaY:10,preventDefault(){prevented=true;}});assert.ok(prevented);assert.equal(s.run('wb.view.x'),35);assert.equal(s.run('wb.view.y'),10);
- s.key('Equal');assert.ok(s.run('wb.view.zoom')>1);s.key('Digit0');assert.equal(s.run('wb.view.zoom'),1);
+ s.key('Equal');assert.ok(s.run('wb.view.zoom')>1);s.key('Digit0');assert.ok(s.run('wb.view.zoom')<1);s.key('Home');assert.equal(s.run('wb.view.zoom'),1);
  s.key('KeyS');assert.equal(s.run('wb.tool'),'pan');s.key('KeyQ');s.key('Space');assert.equal(s.run('wb.spacePan'),true);s.handlers.keyup({code:'Space'});assert.equal(s.run('wb.spacePan'),false);
  assert.equal(s.run('wb.dirty'),false);assert.equal(s.timers.size,0);
 });

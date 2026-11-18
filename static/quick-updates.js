@@ -12,7 +12,7 @@ async function updateTaskCheckbox(input){
       const values=document.querySelectorAll('#content .stats-grid .stat-value');const tasks=cache.tasks||[];const counts=[tasks.length,tasks.filter(t=>!t.done).length,tasks.filter(t=>t.done).length,tasks.filter(t=>t.attachments?.length).length];values.forEach((el,i)=>{if(i<counts.length)el.textContent=counts[i];});
     }
     if(page==='home'){const count=document.querySelector('.day-metrics > div:first-child b');if(count)count.textContent=(cache.tasks||[]).filter(t=>!t.done).length;refreshHomeMenuCounts();}
-    toast(done?'Задание выполнено':'Задание снова в работе');
+    if(done&&typeof spaceCelebrateTask==='function')spaceCelebrateTask(input);toast(done?'Задание выполнено':'Задание снова в работе');
  }catch(e){input.checked=!done;toast(e.message);}finally{input.disabled=false;}
 }
 async function updateHomeHabitCheckbox(input){
@@ -30,6 +30,7 @@ async function updateHomeHabitCheckbox(input){
  }catch(e){input.checked=!done;toast(e.message);}finally{input.disabled=false;}
 }
 function animatePageEntrance(root){
+ if(typeof spaceAnimatePage==='function'){spaceAnimatePage(root);return;}
  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
  Array.from(root.children).slice(0,8).forEach((node,i)=>{if(typeof node.animate==='function')node.animate([{opacity:0,transform:'translateY(7px)'},{opacity:1,transform:'translateY(0)'}],{duration:190,delay:Math.min(i*15,60),easing:'cubic-bezier(.2,.65,.3,1)',fill:'backwards'});});
 }

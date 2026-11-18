@@ -24,3 +24,6 @@ jobs:
       - run: node --test tests/quick-updates.test.cjs
       - run: node --check static/planet-menu.js
       - run: node --test tests/planet-menu.test.cjs
+      - run: node --check static/motivation.js
+      - run: node --check static/space-effects.js
+      - run: node --test tests/motivation.test.cjs

@@ -392,21 +392,24 @@ def get_whiteboard(task_id:int|None=None,user:User=Depends(current_user),db:Sess
 def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     if task_id is not None: owned(db,Task,task_id,user)
     revision=d.get('revision')
+    if d.get('layout') not in (None,'large-v1'): raise HTTPException(422,'Неизвестный формат доски')
+    large=d.get('layout')=='large-v1'
+    world_w,world_h=(12000,8000) if large else (1600,1000)
     if type(revision) is not int or revision<0: raise HTTPException(422,'Некорректная версия доски')
     def validate_page(data):
         if not isinstance(data,dict): raise HTTPException(422,'Некорректный лист')
         strokes=data.get('strokes'); images=data.get('images',[]); grid=data.get('grid',True)
-        if not isinstance(strokes,list) or len(strokes)>1500: raise HTTPException(422,'Некорректная доска')
+        if not isinstance(strokes,list) or len(strokes)>(30000 if large else 1500): raise HTTPException(422,'Некорректная доска')
         total=0
         for stroke in strokes:
             if not isinstance(stroke,dict) or stroke.get('tool') not in ('pen','marker','line','eraser') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(stroke.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
             width=stroke.get('width'); points=stroke.get('points')
             if type(width) not in (int,float) or not 1<=width<=40 or not isinstance(points,list) or not 1<=len(points)<=4000: raise HTTPException(422,'Некорректная линия')
             total+=len(points)
-            if total>40000: raise HTTPException(413,'Лист слишком большой. Экспортируй PNG и создай следующий.')
+            if total>(800000 if large else 40000): raise HTTPException(413,'Лист слишком большой. Экспортируй PNG и создай следующий.')
             for point in points:
-                if not isinstance(point,list) or len(point)!=2 or any(type(v) not in (int,float) for v in point) or not (0<=point[0]<=1600 and 0<=point[1]<=1000): raise HTTPException(422,'Некорректная координата')
-        if not isinstance(images,list) or len(images)>8 or type(grid) is not bool: raise HTTPException(422,'Не более 8 фото на листе')
+                if not isinstance(point,list) or len(point)!=2 or any(type(v) not in (int,float) for v in point) or not (0<=point[0]<=world_w and 0<=point[1]<=world_h): raise HTTPException(422,'Некорректная координата')
+        if not isinstance(images,list) or len(images)>(160 if large else 8) or type(grid) is not bool: raise HTTPException(422,'Слишком много фото на доске')
         clean_images=[]
         for image in images:
             if not isinstance(image,dict): raise HTTPException(422,'Некорректное фото')
@@ -415,7 +418,7 @@ def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user)
             asset=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='board-image:'+stored))
             if not asset or not (UPLOAD_DIR/stored).is_file(): raise HTTPException(404,'Фото не найдено')
             x,y,w,h=(image.get(k) for k in ('x','y','w','h'))
-            if any(type(v) not in (int,float) for v in (x,y,w,h)) or not (0<=x<=1560 and 0<=y<=960 and 40<=w<=1600 and 40<=h<=1000 and x+w<=1600.01 and y+h<=1000.01): raise HTTPException(422,'Фото выходит за границы доски')
+            if any(type(v) not in (int,float) for v in (x,y,w,h)) or not (0<=x<=world_w-40 and 0<=y<=world_h-40 and 40<=w<=world_w and 40<=h<=world_h and x+w<=world_w+.01 and y+h<=world_h+.01): raise HTTPException(422,'Фото выходит за границы доски')
             clean_images.append({'stored_name':stored,'x':x,'y':y,'w':w,'h':h})
         return {'strokes':strokes,'images':clean_images,'grid':grid}
     pages=d.get('pages')
@@ -428,11 +431,14 @@ def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user)
     key='whiteboard:'+str(task_id or 'personal'); row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key==key))
     old=json.loads(row.value) if row else {'revision':0}
     if old['revision']!=revision: raise HTTPException(409,'Доска изменена в другом окне. Экспортируй PNG и перезагрузи страницу.')
-    if old.get('pages') and pages is None: raise HTTPException(409,'Обнови страницу для сохранения всех листов')
+    if (old.get('pages') and pages is None and not large) or (old.get('layout')=='large-v1' and not large): raise HTTPException(409,'Обнови страницу для сохранения всех листов')
     result={'revision':revision+1,**page}
+    if large:
+        if pages is not None: raise HTTPException(422,'Большая доска не использует отдельные листы')
+        result['layout']='large-v1';result['canvas']={'width':12000,'height':8000}
     if pages is not None: result['pages']=pages
     value=json.dumps(result,separators=(',',':'))
-    if len(value)>(4000000 if task_id is not None else 1000000): raise HTTPException(413,'Доска слишком большая. Экспортируй PNG.')
+    if len(value)>(32000000 if large else (4000000 if task_id is not None else 1000000)): raise HTTPException(413,'Доска слишком большая. Экспортируй PNG.')
     if row:
         count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).update({'value':value},synchronize_session=False)
         if count!=1: db.rollback(); raise HTTPException(409,'Доска изменена в другом окне')

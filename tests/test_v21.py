@@ -246,6 +246,27 @@ class V21Tests(unittest.TestCase):
         finally: app.app.dependency_overrides.pop(app.current_user,None)
 
 
+
+    def test_large_whiteboard_bounds_and_legacy_sheet_migration(self):
+        app.app.dependency_overrides[app.current_user]=lambda:self.user
+        try:
+            task=self.task()
+            with TestClient(app.app) as client:
+                client.cookies.set('sf_csrf','board-test');headers={'X-CSRF-Token':'board-test'}
+                url='/api/whiteboard?task_id='+str(task.id)
+                sheet={'strokes':[],'images':[],'grid':True}
+                self.assertEqual(client.put(url,json={'revision':0,'pages':[sheet,sheet]},headers=headers).status_code,200)
+                data={'revision':1,'layout':'large-v1','strokes':[{'tool':'pen','color':'#111111','width':4,'points':[[11990,7990]]}],'images':[],'grid':True}
+                result=client.put(url,json=data,headers=headers)
+                self.assertEqual(result.status_code,200,result.text)
+                saved=client.get(url).json()
+                self.assertEqual(saved['layout'],'large-v1');self.assertNotIn('pages',saved)
+                self.assertEqual(saved['strokes'],data['strokes'])
+                self.assertEqual(client.put(url,json={'revision':2,'strokes':[]},headers=headers).status_code,409)
+                data['revision']=2;data['strokes'][0]['points']=[[12001,8000]]
+                self.assertEqual(client.put(url,json=data,headers=headers).status_code,422)
+        finally: app.app.dependency_overrides.pop(app.current_user,None)
+
 class AssistantTests(unittest.TestCase):
     task = V21Tests.task
 

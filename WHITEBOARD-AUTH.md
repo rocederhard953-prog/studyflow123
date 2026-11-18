@@ -47,3 +47,8 @@
 ## Островная навигация без панели
 
 Боковая панель, блок профиля в ней и нижнее мобильное меню удалены из HTML. Главная навигация — 19 самостоятельных парящих островов, соединённых с планетой. Планета вращается, острова слегка покачиваются, подсвечиваются при наведении и поддерживают выбор клавиатурой. На телефоне острова располагаются под планетой в две колонки. В каждом разделе сверху есть «← Главное меню». Выход из аккаунта находится в разделе «Настройки». Страница использует всю доступную ширину. prefers-reduced-motion отключает декоративное движение.
+
+
+## Large single board
+
+The current UI uses one 12000 × 8000 world for personal and homework boards. Previous homework sheets are merged into a four-column layout automatically and saved with layout large-v1. No new sheets can be created. Home returns to the beginning; 0 fits the whole world. Rendering uses viewport-sized canvases and loads visible photos on demand. PNG exports the current view. Autosave and revision conflict protection remain enabled.
