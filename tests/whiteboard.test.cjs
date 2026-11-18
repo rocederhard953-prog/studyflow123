@@ -3,17 +3,17 @@ const source=fs.readFileSync(path.join(__dirname,'../static/whiteboard.js'),'utf
 function setup(){
  const handlers={},logs=[],timers=new Map(),windowHandlers={};let timerId=0;
  function canvas(){const ctx=new Proxy({},{get(o,k){if(k in o)return o[k];return (...args)=>logs.push([k,ctx.globalCompositeOperation,...args]);}});return {width:1600,height:1000,getContext:()=>ctx,getBoundingClientRect:()=>({left:0,top:0,width:1600,height:1000}),setPointerCapture(){},style:{}};}
- const surface=canvas(),nodes={wbCanvas:surface,wbWidth:{},wbWidthValue:{},wbStatus:{},wbPhotoFile:{},wbDropZone:{classList:{add(){},remove(){}}}};
+ const surface=canvas(),nodes={wbCanvas:surface,wbWidth:{},wbWidthValue:{},wbStatus:{},wbPhotoFile:{},wbDropZone:{style:{},clientWidth:1600,clientHeight:1000,getBoundingClientRect:()=>({left:0,top:0,width:1600,height:1000}),setPointerCapture(){},addEventListener(name,fn){this[name]=fn;},classList:{add(){},remove(){}}}};
  const context=vm.createContext({page:'whiteboard',document:{addEventListener:(name,f)=>handlers[name]=f,querySelectorAll:()=>[],querySelector:()=>null,getElementById:id=>nodes[id]||null,createElement:name=>name==='canvas'?canvas():{}},window:{addEventListener:(n,f)=>windowHandlers[n]=f},confirm:()=>true,toast(){},setTimeout:f=>{timers.set(++timerId,f);return timerId;},clearTimeout:id=>timers.delete(id),requestAnimationFrame:f=>{f();return 0;},api:async()=>({revision:1})});
  vm.runInContext(source,context);
  const run=code=>vm.runInContext(code,context);
  const key=(code,extra={})=>handlers.keydown({code,key:'',target:{tagName:'BODY'},preventDefault(){},...extra});
  const runTimer=()=>{const next=timers.entries().next().value;if(next){timers.delete(next[0]);next[1]();}};
- return {context,handlers,run,key,surface,logs,timers,runTimer,windowHandlers};
+ return {context,handlers,run,key,surface,logs,timers,runTimer,windowHandlers,zone:nodes.wbDropZone};
 }
 test('left-hand shortcuts use physical positions and ignore text input',()=>{
  const s=setup();for(const [code,tool] of [['KeyQ','pen'],['KeyW','marker'],['KeyE','eraser'],['KeyR','line'],['KeyA','select']]){s.key(code,{key:'й'});assert.equal(s.run('wb.tool'),tool);}
- s.key('KeyZ');assert.equal(s.run('wb.width'),3);s.key('KeyX');assert.equal(s.run('wb.width'),4);s.key('Digit3');assert.equal(s.run('wb.color'),'#2374da');s.key('KeyD');assert.equal(s.run('wb.color'),'#d34263');
+ s.key('KeyZ');assert.equal(s.run('wb.width'),2);s.key('KeyX');assert.equal(s.run('wb.width'),4);s.key('KeyC');assert.equal(s.run('wb.width'),6);s.key('Digit3');assert.equal(s.run('wb.color'),'#16803d');s.key('KeyD');assert.equal(s.run('wb.color'),'#111111');
  s.key('KeyQ',{target:{tagName:'TEXTAREA'}});assert.equal(s.run('wb.tool'),'select');
 });
 test('photo moves and proportional resizing can be undone and redone',()=>{
@@ -70,4 +70,28 @@ test('autosave preserves unsaved data on failure and retries when online',async(
 });
 test('autosave stops on revision conflict instead of overwriting another window',async()=>{
  const s=setup();s.context.api=async()=>{throw Error('Доска изменена в другом окне');};s.run("wb.key='personal';wbChanged()");s.runTimer();await new Promise(r=>setImmediate(r));assert.equal(s.run('wb.dirty'),true);assert.equal(s.run('wb.conflict'),true);assert.equal(s.timers.size,0);
+});
+test('object eraser removes one whole topmost stroke, supports undo and leaves photos intact',()=>{
+ const s=setup();s.run("wb.images=[{stored_name:'photo',x:0,y:0,w:200,h:100}];wb.strokes=[{tool:'pen',width:2,color:'#111111',points:[[10,10],[90,10]]},{tool:'marker',width:6,color:'#dc2626',points:[[10,10],[90,10]]}];wb.tool='eraser';bindWhiteboard()");
+ s.surface.onpointerdown({button:0,pointerId:1,clientX:50,clientY:10,pointerType:'mouse'});
+ assert.equal(s.run('wb.strokes.length'),1);assert.equal(s.run('wb.strokes[0].tool'),'pen');assert.equal(s.run('wb.images.length'),1);
+ s.surface.onpointermove({pointerId:1,clientX:60,clientY:10});assert.equal(s.run('wb.strokes.length'),1);
+ s.key('KeyZ',{ctrlKey:true});assert.equal(s.run('wb.strokes.length'),2);s.key('KeyZ',{ctrlKey:true,shiftKey:true});assert.equal(s.run('wb.strokes.length'),1);
+ assert.equal(s.run('wbEraseAt([800,800],2)'),false);assert.equal(s.run('wb.strokes.length'),1);
+});
+test('stroke hit testing uses actual straight lines and dots, not their bounding boxes',()=>{
+ const s=setup();assert.equal(s.run("wbHitStroke({tool:'line',width:2,points:[[10,10],[80,90],[100,10]]},[50,10],2)"),true);
+ assert.equal(s.run("wbHitStroke({tool:'line',width:2,points:[[10,10],[100,100]]},[20,90],2)"),false);
+ assert.equal(s.run("wbHitStroke({tool:'pen',width:2,points:[[50,50]]},[51,50],1)"),true);
+ assert.equal(s.run("wbHitStroke({tool:'eraser',width:20,points:[[50,50]]},[50,50],8)"),false);
+});
+test('hand panning, wheel scrolling and zoom do not draw or autosave',()=>{
+ const s=setup();s.run("wb.tool='pan';bindWhiteboard()");
+ const event=(x,y)=>({button:0,pointerId:1,clientX:x,clientY:y,preventDefault(){}});
+ s.zone.onpointerdown(event(300,300));s.zone.onpointermove(event(340,320));s.zone.onpointerup(event(340,320));
+ assert.equal(s.run('wb.view.x'),40);assert.equal(s.run('wb.view.y'),20);assert.equal(s.run('wb.strokes.length'),0);assert.equal(s.run('wb.dirty'),false);
+ let prevented=false;s.zone.wheel({deltaX:5,deltaY:10,preventDefault(){prevented=true;}});assert.ok(prevented);assert.equal(s.run('wb.view.x'),35);assert.equal(s.run('wb.view.y'),10);
+ s.key('Equal');assert.ok(s.run('wb.view.zoom')>1);s.key('Digit0');assert.equal(s.run('wb.view.zoom'),1);
+ s.key('KeyS');assert.equal(s.run('wb.tool'),'pan');s.key('KeyQ');s.key('Space');assert.equal(s.run('wb.spacePan'),true);s.handlers.keyup({code:'Space'});assert.equal(s.run('wb.spacePan'),false);
+ assert.equal(s.run('wb.dirty'),false);assert.equal(s.timers.size,0);
 });

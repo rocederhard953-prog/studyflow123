@@ -22,3 +22,5 @@ jobs:
       - run: node --test tests/whiteboard.test.cjs
       - run: node --check static/quick-updates.js
       - run: node --test tests/quick-updates.test.cjs
+      - run: node --check static/planet-menu.js
+      - run: node --test tests/planet-menu.test.cjs
