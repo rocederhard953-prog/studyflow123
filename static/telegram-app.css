@@ -5,3 +5,5 @@
 .telegram-mini-app .assistant-launcher{bottom:calc(85px + var(--tg-inset-bottom,0px))}
 .telegram-mini-app .sidebar{padding-top:calc(24px + var(--tg-inset-top,0px))}
 @media(max-width:600px){.telegram-mini-app input,.telegram-mini-app select,.telegram-mini-app textarea{font-size:16px}.telegram-mini-app .modal-wrap{padding-top:calc(12px + var(--tg-inset-top,0px));padding-bottom:calc(12px + var(--tg-inset-bottom,0px))}.telegram-mini-app .modal{max-height:calc(var(--tg-app-height,100dvh) - var(--tg-inset-top,0px) - var(--tg-inset-bottom,0px) - 24px)}}
+
+.auth-extra-actions{display:grid;gap:7px;margin-top:12px}.auth-tg-link{display:block;text-align:center;text-decoration:none}.auth-extra-actions button{min-height:44px}

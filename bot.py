@@ -312,10 +312,27 @@ def parse_homework_date(chat,text):
         except ValueError:return send(chat,'Неверная дата. Введи ДД.ММ.ГГГГ (например, 15.11.2026) или нажми «Завтра».',[[{'text':'Завтра','callback_data':'hwdate:1'},{'text':'Послезавтра','callback_data':'hwdate:2'}]]+draft_keyboard())
     return homework_date(chat,day)
 
+def send_auth_link(msg,purpose):
+    chat=str(msg.get('chat',{}).get('id',''))
+    if msg.get('chat',{}).get('type')!='private' or str(msg.get('from',{}).get('id',''))!=chat:return
+    from app import issue_telegram_auth_link
+    with SessionLocal() as db:
+        user=linked_user(db,chat)
+        if not user:return send(chat,'Этот Telegram ещё не привязан. Войди на сайт с паролем, открой раздел Telegram и привяжи аккаунт. Если пароль забыт до привязки, потребуется помощь владельца платформы.')
+        raw=issue_telegram_auth_link(db,user,purpose)
+    label='Войти в My-Study' if purpose=='login' else 'Задать новый пароль'
+    url=SITE+'/#tg_'+purpose+'='+raw
+    return send(chat,label+'\n\nСсылка одноразовая и действует 10 минут. Не пересылай её другим людям.',[[{'text':label,'url':url}]])
+
+
 def handle(msg):
     chat=str(msg.get('chat',{}).get('id','')); text=(msg.get('text') or '').strip()
     if not chat:return
-    if text.split(maxsplit=1)[0].split('@',1)[0]=='/admin':return admin_login(chat)
+    command=text.split(maxsplit=1)[0].split('@',1)[0] if text else ''
+    payload=text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1))>1 else ''
+    if command=='/login' or (command=='/start' and payload=='login'):return send_auth_link(msg,'login')
+    if command=='/reset' or (command=='/start' and payload=='reset'):return send_auth_link(msg,'reset')
+    if command=='/admin':return admin_login(chat)
     with DRAFT_LOCK: photo_step=DRAFTS.get(chat,{}).get('step')
     if msg.get('photo') and photo_step=='photos':return receive_homework_photo(chat,msg)
     if not text:return

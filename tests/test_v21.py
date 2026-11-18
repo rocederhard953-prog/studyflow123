@@ -399,3 +399,59 @@ class GeminiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TelegramAuthTests(unittest.TestCase):
+    setUp = V21Tests.setUp
+
+    def signed_data(self,telegram_id=123,age=0):
+        import json,hmac,hashlib
+        from urllib.parse import urlencode
+        fields={'auth_date':str(int(datetime.now(timezone.utc).timestamp())-age),'user':json.dumps({'id':telegram_id})}
+        secret=hmac.new(b'WebAppData',b'test-bot-key',hashlib.sha256).digest()
+        fields['hash']=hmac.new(secret,'\n'.join(k+'='+v for k,v in sorted(fields.items())).encode(),hashlib.sha256).hexdigest()
+        return urlencode(fields)
+
+    def test_signed_telegram_login_rejects_tampering_expiry_and_unlinked_users(self):
+        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'test-bot-key'}),TestClient(app.app) as client:
+            client.cookies.set('sf_csrf','tg-test',domain='testserver.local',path='/');headers={'X-CSRF-Token':'tg-test'}
+            self.assertEqual(client.post('/api/auth/telegram',json={'init_data':self.signed_data()}).status_code,403)
+            self.assertEqual(client.post('/api/auth/telegram',json={'init_data':self.signed_data()+'x'},headers=headers).status_code,401)
+            self.assertEqual(client.post('/api/auth/telegram',json={'init_data':self.signed_data(age=700)},headers=headers).status_code,401)
+            self.assertEqual(client.post('/api/auth/telegram',json={'init_data':self.signed_data(456)},headers=headers).status_code,403)
+            self.assertEqual(client.post('/api/auth/telegram',json={'init_data':self.signed_data()},headers=headers).status_code,200)
+            self.assertEqual(client.get('/api/me').json()['id'],self.user.id)
+
+    def test_bot_auth_links_are_single_use_and_reset_revokes_sessions(self):
+        with TestClient(app.app) as client:
+            client.cookies.set('sf_csrf','tg-test',domain='testserver.local',path='/');headers={'X-CSRF-Token':'tg-test'}
+            with app.SessionLocal() as db: token=app.issue_telegram_auth_link(db,self.user,'login')
+            body={'token':token,'purpose':'login'}
+            self.assertEqual(client.post('/api/auth/link-info',json=body,headers=headers).json()['username'],'student')
+            self.assertEqual(client.post('/api/auth/reset-password',json={'token':token,'password':'replacement-password'},headers=headers).status_code,400)
+            self.assertEqual(client.post('/api/auth/link-login',json=body,headers=headers).status_code,200)
+            old_cookie=client.cookies.get('sf_session')
+            headers={'X-CSRF-Token':client.cookies.get('sf_csrf')}
+            self.assertEqual(client.post('/api/auth/link-login',json=body,headers=headers).status_code,400)
+            with app.SessionLocal() as db: reset=app.issue_telegram_auth_link(db,self.user,'reset')
+            self.assertEqual(client.post('/api/auth/reset-password',json={'token':reset,'password':'short'},headers=headers).status_code,422)
+            self.assertEqual(client.post('/api/auth/reset-password',json={'token':reset,'password':'replacement-password'},headers=headers).status_code,200)
+            self.assertEqual(client.get('/api/me').status_code,200)
+            with app.SessionLocal() as db:
+                self.assertTrue(app.verify_password('replacement-password',db.get(app.User,self.user.id).password_hash))
+                self.assertIsNone(db.scalar(select(app.AuthSession).where(app.AuthSession.token_hash==app.token_hash(old_cookie))))
+            headers={'X-CSRF-Token':client.cookies.get('sf_csrf')}
+            self.assertEqual(client.post('/api/auth/reset-password',json={'token':reset,'password':'another-password'},headers=headers).status_code,400)
+
+    def test_auth_link_expiry_and_private_chat_only(self):
+        import json
+        with app.SessionLocal() as db:
+            token=app.issue_telegram_auth_link(db,self.user,'login')
+            row=db.scalar(select(app.UserSetting).where(app.UserSetting.key=='auth-link:'+app.token_hash(token)))
+            row.value=json.dumps({'purpose':'login','expires':0});db.commit()
+        with TestClient(app.app) as client:
+            client.cookies.set('sf_csrf','tg-test',domain='testserver.local',path='/')
+            self.assertEqual(client.post('/api/auth/link-info',json={'token':token,'purpose':'login'},headers={'X-CSRF-Token':'tg-test'}).status_code,400)
+        with patch.object(bot,'send') as send:
+            bot.send_auth_link({'chat':{'id':123,'type':'group'},'from':{'id':123}},'reset')
+            send.assert_not_called()

@@ -236,6 +236,99 @@ def login(data:LoginData,response:Response,db:Session=Depends(dbdep)):
     key=data.login.strip().lower(); u=db.scalar(select(User).where((User.email==key)|(func.lower(User.username)==key)))
     if not u or not verify_password(data.password,u.password_hash): raise HTTPException(401,'Неверный логин или пароль')
     ensure_default_reminders(db,u.id);set_auth(response,db,u); db.commit(); return {'ok':True}
+def issue_telegram_auth_link(db,user,purpose):
+    raw=secrets.token_urlsafe(32)
+    db.query(UserSetting).filter(UserSetting.user_id==user.id,UserSetting.key.like('auth-link:%')).delete(synchronize_session=False)
+    db.add(UserSetting(user_id=user.id,key='auth-link:'+token_hash(raw),value=json.dumps({'purpose':purpose,'expires':int(datetime.now(timezone.utc).timestamp())+600})))
+    db.commit()
+    return raw
+
+def find_auth_link(db,token,purpose):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{40,60}',token): raise HTTPException(400,'Ссылка недействительна или истекла. Получи новую в боте.')
+    row=db.scalar(select(UserSetting).where(UserSetting.key=='auth-link:'+token_hash(token)))
+    if not row: raise HTTPException(400,'Ссылка недействительна или уже использована.')
+    data=json.loads(row.value)
+    if data.get('purpose')!=purpose or data.get('expires',0)<datetime.now(timezone.utc).timestamp(): raise HTTPException(400,'Ссылка недействительна или истекла. Получи новую в боте.')
+    user=db.get(User,row.user_id)
+    if not user: raise HTTPException(400,'Аккаунт не найден')
+    return row,user
+
+_auth_bot_cache={'username':'','expires':0}
+@app.get('/api/auth/options')
+def auth_options(request:Request,response:Response):
+    if not request.cookies.get('sf_csrf'):
+        response.set_cookie('sf_csrf',secrets.token_urlsafe(24),max_age=1800,samesite='lax',secure=os.getenv('COOKIE_SECURE','0')=='1',path='/')
+    response.headers['Cache-Control']='no-store'
+    username=os.getenv('TELEGRAM_BOT_USERNAME','').strip().lstrip('@')
+    now=datetime.now(timezone.utc).timestamp()
+    if not username and _auth_bot_cache['expires']>now: username=_auth_bot_cache['username']
+    if not username and os.getenv('TELEGRAM_BOT_TOKEN','').strip():
+        try:
+            import urllib.request
+            with urllib.request.urlopen('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN'].strip()+'/getMe',timeout=5) as r: data=json.loads(r.read(16384))
+            username=data.get('result',{}).get('username','') if data.get('ok') else ''
+            if username: _auth_bot_cache.update(username=username,expires=now+600)
+        except Exception: pass
+    if not re.fullmatch(r'[A-Za-z0-9_]{5,32}',username): username=''
+    return {'bot_url':'https://t.me/'+username if username else None}
+
+class TelegramAuthData(BaseModel):
+    init_data:str=Field(min_length=1,max_length=16000)
+
+@app.post('/api/auth/telegram')
+def login_telegram(data:TelegramAuthData,response:Response,db:Session=Depends(dbdep)):
+    from urllib.parse import parse_qsl
+    token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
+    if not token: raise HTTPException(503,'Telegram не подключён на сервере')
+    try:
+        pairs=parse_qsl(data.init_data,keep_blank_values=True,strict_parsing=True)
+        fields=dict(pairs)
+        if len(fields)!=len(pairs): raise ValueError()
+        received=fields.pop('hash')
+        signed='\n'.join(k+'='+v for k,v in sorted(fields.items()))
+        secret=hmac.new(b'WebAppData',token.encode(),hashlib.sha256).digest()
+        expected=hmac.new(secret,signed.encode(),hashlib.sha256).hexdigest()
+        now=int(datetime.now(timezone.utc).timestamp()); issued=int(fields['auth_date'])
+        if not hmac.compare_digest(expected,received) or not -30<=now-issued<=600: raise ValueError()
+        telegram_user=json.loads(fields['user']); telegram_id=telegram_user['id']
+        if type(telegram_id) is not int or telegram_id<=0: raise ValueError()
+    except Exception: raise HTTPException(401,'Проверка Telegram не пройдена. Закрой и заново открой Mini App.') from None
+    link=db.scalar(select(TelegramLink).where(TelegramLink.chat_id==str(telegram_id)))
+    user=db.get(User,link.user_id) if link else None
+    if not user: raise HTTPException(403,'Сначала войди с паролем и привяжи Telegram в настройках сайта.')
+    set_auth(response,db,user);db.commit();return {'ok':True}
+
+class AuthLinkData(BaseModel):
+    token:str=Field(min_length=40,max_length=60)
+    purpose:str=Field(pattern='^(login|reset)$')
+
+@app.post('/api/auth/link-info')
+def auth_link_info(data:AuthLinkData,db:Session=Depends(dbdep)):
+    _,user=find_auth_link(db,data.token,data.purpose)
+    return {'username':user.username,'display_name':user.display_name}
+
+@app.post('/api/auth/link-login')
+def auth_link_login(data:AuthLinkData,response:Response,db:Session=Depends(dbdep)):
+    if data.purpose!='login': raise HTTPException(400,'Неверный тип ссылки')
+    row,user=find_auth_link(db,data.token,'login')
+    count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).delete(synchronize_session=False)
+    if count!=1: db.rollback();raise HTTPException(400,'Ссылка уже использована')
+    set_auth(response,db,user);db.commit();return {'ok':True}
+
+class ResetPasswordData(BaseModel):
+    token:str=Field(min_length=40,max_length=60)
+    password:str=Field(min_length=8,max_length=128)
+
+@app.post('/api/auth/reset-password')
+def reset_password(data:ResetPasswordData,response:Response,db:Session=Depends(dbdep)):
+    row,user=find_auth_link(db,data.token,'reset')
+    count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).delete(synchronize_session=False)
+    if count!=1: db.rollback();raise HTTPException(400,'Ссылка уже использована')
+    user.password_hash=hash_password(data.password)
+    db.query(AuthSession).filter(AuthSession.user_id==user.id).delete(synchronize_session=False)
+    set_auth(response,db,user);db.commit();return {'ok':True}
+
+
 @app.post('/api/logout')
 def logout(request:Request,response:Response,db:Session=Depends(dbdep)):
     token=request.cookies.get('sf_session','')
