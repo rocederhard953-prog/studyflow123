@@ -274,6 +274,21 @@ def habit_check(hid:int,d:dict,user:User=Depends(current_user),db:Session=Depend
 def del_habit(hid:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     h=owned(db,Habit,hid,user); db.query(HabitCheck).filter_by(habit_id=h.id,user_id=user.id).delete(); db.delete(h); db.commit(); return {'ok':True}
 
+@app.get('/api/habit-notes')
+def habit_notes(user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    prefix='habit-note:'
+    return {x.key[len(prefix):]:x.value for x in db.scalars(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key.like(prefix+'%'))).all()}
+@app.put('/api/habit-notes')
+def save_habit_note(d:dict,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    day=clean_date(d.get('day')); note=str(d.get('note','')).strip()
+    if not day or len(note)>1000: raise HTTPException(422,'Проверь дату и заметку (до 1000 символов)')
+    key='habit-note:'+day.isoformat(); row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key==key))
+    if note:
+        if row: row.value=note
+        else: db.add(UserSetting(user_id=user.id,key=key,value=note))
+    elif row: db.delete(row)
+    db.commit(); return {'ok':True}
+
 @app.get('/api/tasks')
 def list_tasks(user:User=Depends(current_user),db:Session=Depends(dbdep)):
     ts=db.scalars(select(Task).where(Task.user_id==user.id).order_by(Task.done,Task.due,Task.id.desc())).all()
@@ -647,7 +662,7 @@ def assistant_status(user:User=Depends(current_user),db:Session=Depends(dbdep)):
     site_used=db.get(AIUsage,('site',day))
     limit=assistant.positive_setting('AI_USER_DAILY_LIMIT',20,500)
     site_limit=assistant.positive_setting('AI_SITE_DAILY_LIMIT',200,10000)
-    return {'ai_ready':assistant.ai_configured(),'daily_limit':limit,
+    return {'ai_ready':assistant.ai_configured(),'provider':assistant.ai_provider(),'privacy_notice':assistant.provider_notice(),'daily_limit':limit,
             'remaining':max(0,min(limit-(used.requests if used else 0),site_limit-(site_used.requests if site_used else 0))),
             'reset_at':datetime.combine(day+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc).isoformat(),
             'navigation_ready':True}
