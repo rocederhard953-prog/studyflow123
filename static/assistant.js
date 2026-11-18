@@ -1,5 +1,5 @@
 /* A per-account, memory-only conversation. No API key or persisted transcript in the browser. */
-const AI_PAGES=new Set(['home','tasks','schedule','habits','pomodoro','calendar','grades','cards','cheats','goals','analytics','subjects','telegram','reminders','appearance','settings','search']);
+const AI_PAGES=new Set(['home','day','whiteboard','tasks','schedule','habits','calendar','cheats','goals','analytics','subjects','telegram','reminders','appearance','settings','search']);
 let ai={messages:[],mode:'study',taskId:null,photos:false,status:null,tasks:[],busy:false,controller:null,origin:'home',generation:0};
 
 function resetAssistantAccount(){
@@ -33,7 +33,7 @@ async function assistantPage(){
 }
 
 function bindAssistant(){
-  document.querySelectorAll('[data-ai-task]').forEach(b=>b.onclick=()=>openAssistant(b.dataset.aiTask));
+  document.querySelectorAll('[data-ai-task]').forEach(b=>b.onclick=()=>openTaskAssistant(b.dataset.aiTask,b.dataset.aiIntent));
   if(!document.getElementById('aiForm'))return;
   document.getElementById('aiForm').onsubmit=sendAssistantMessage;
   document.getElementById('aiInput').onkeydown=e=>{
@@ -48,6 +48,7 @@ function bindAssistant(){
   document.getElementById('aiTaskSelect').onchange=e=>{ai.taskId=e.target.value?Number(e.target.value):null;ai.photos=false;document.getElementById('aiPhotos').checked=false;updateAssistantContext();};
   document.getElementById('aiPhotos').onchange=e=>ai.photos=e.target.checked;
   renderAssistantMessages();updateAssistantContext();
+ if(ai.prefill){document.getElementById('aiInput').value=ai.prefill;ai.prefill='';document.getElementById('aiInput').focus();}
 }
 
 function updateAssistantContext(){
@@ -61,7 +62,7 @@ function updateAssistantContext(){
   const photos=document.getElementById('aiPhotos');photos.disabled=!task?.attachments?.length||ai.busy;
   if(photos.disabled){photos.checked=false;ai.photos=false;}
   document.getElementById('aiTaskSelect').disabled=ai.busy;
-  const suggestions=study?['Реши выбранное задание полностью и дай ответ','Объясни тему и разбери пример','Проверь моё решение']:['Где добавить домашнее задание?','Как привязать Telegram?','Как изменить время вечерней сводки?'];
+  const suggestions=study?['Реши выбранное задание полностью и дай ответ','Объясни тему и разбери пример','Проверь моё решение','Дай похожий пример с решением']:['Где добавить домашнее задание?','Как привязать Telegram?','Как изменить время вечерней сводки?'];
   const list=document.getElementById('aiSuggestions');list.replaceChildren();
   for(const text of suggestions){const b=document.createElement('button');b.textContent=text;b.type='button';b.onclick=()=>{document.getElementById('aiInput').value=text;document.getElementById('aiInput').focus();};list.append(b);}
   document.getElementById('aiSend').disabled=ai.busy||(study&&!ai.status?.ai_ready);
@@ -127,3 +128,6 @@ async function sendAssistantMessage(event){
 }
 
 document.getElementById('assistantLauncher').onclick=()=>openAssistant();
+
+function openTaskAssistant(taskId,intent){openAssistant(taskId);ai.prefill={solve:'Реши выбранное задание полностью по шагам и дай ответ',explain:'Объясни тему выбранного задания на понятных примерах',check:'Проверь моё решение выбранного задания. Сейчас пришлю решение.',similar:'Дай похожий пример к выбранному заданию и разбери его решение'}[intent]||'';}
+

@@ -351,21 +351,24 @@ def list_habits(user:User=Depends(current_user),db:Session=Depends(dbdep)):
     hs=db.scalars(select(Habit).where(Habit.user_id==user.id).order_by(Habit.id.desc())).all(); today=date.today()
     checks=db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id)).all(); by={}
     for c in checks: by.setdefault(c.habit_id,[]).append(c.day.isoformat())
-    return [{**serialize(h),'days':[int(x) for x in h.days.split(',') if x!=''],'checks':by.get(h.id,[])} for h in hs]
+    return [{**serialize(h),'days':[int(x) for x in h.days.split(',') if x!=''],'checks':by.get(h.id,[]),**habit_details(db,user.id,h.id)} for h in hs]
 @app.post('/api/habits')
 def add_habit(d:dict,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     name=str(d.get('name','')).strip(); days=d.get('days',list(range(7)))
     if not name or len(name)>120 or not isinstance(days,list) or any(not isinstance(x,int) or x not in range(7) for x in days): raise HTTPException(422,'Проверь название и дни')
-    x=Habit(user_id=user.id,name=name,days=','.join(map(str,sorted(set(days))))); db.add(x); db.commit(); db.refresh(x); return serialize(x)
+    cfg=validate_habit_config(d.get('config',{}))
+    x=Habit(user_id=user.id,name=name,created_at=user_local_day(user),days=','.join(map(str,sorted(set(days)))));db.add(x);db.flush();feature_put(db,user.id,'habit-config:'+str(x.id),cfg);db.commit();db.refresh(x);return serialize(x)
 @app.put('/api/habits/{hid}/check')
 def habit_check(hid:int,d:dict,user:User=Depends(current_user),db:Session=Depends(dbdep)):
-    h=owned(db,Habit,hid,user); day=clean_date(d.get('day')) or date.today(); c=db.scalar(select(HabitCheck).where(HabitCheck.habit_id==h.id,HabitCheck.day==day))
+    h=owned(db,Habit,hid,user); day=clean_date(d.get('day')) or date.today(); cfg=habit_config(db,user.id,h.id)
+    progress=feature_get(db,user.id,f'habit-progress:{hid}:{day}',{});progress['amount']=cfg['target'] if d.get('done') else 0;feature_put(db,user.id,f'habit-progress:{hid}:{day}',progress)
+    c=db.scalar(select(HabitCheck).where(HabitCheck.habit_id==h.id,HabitCheck.day==day))
     if d.get('done') and not c: db.add(HabitCheck(user_id=user.id,habit_id=h.id,day=day))
     if not d.get('done') and c: db.delete(c)
     db.commit(); return {'ok':True}
 @app.delete('/api/habits/{hid}')
 def del_habit(hid:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
-    h=owned(db,Habit,hid,user); db.query(HabitCheck).filter_by(habit_id=h.id,user_id=user.id).delete(); db.delete(h); db.commit(); return {'ok':True}
+    h=owned(db,Habit,hid,user);db.query(HabitCheck).filter_by(habit_id=h.id,user_id=user.id).delete();db.query(UserSetting).filter(UserSetting.user_id==user.id,(UserSetting.key=='habit-config:'+str(hid))|UserSetting.key.like('habit-progress:'+str(hid)+':%')).delete(synchronize_session=False);db.delete(h);db.commit();return {'ok':True}
 
 @app.get('/api/habit-notes')
 def habit_notes(user:User=Depends(current_user),db:Session=Depends(dbdep)):
@@ -402,7 +405,7 @@ def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user)
         if not isinstance(strokes,list) or len(strokes)>(30000 if large else 1500): raise HTTPException(422,'Некорректная доска')
         total=0
         for stroke in strokes:
-            if not isinstance(stroke,dict) or stroke.get('tool') not in ('pen','marker','line','eraser') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(stroke.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
+            if not isinstance(stroke,dict) or stroke.get('tool') not in ('pen','marker','line','eraser','rectangle','ellipse','triangle','parallelogram','arrow','cylinder','box','cone','sphere','pyramid') or not re.fullmatch(r'#[0-9a-fA-F]{6}',str(stroke.get('color',''))): raise HTTPException(422,'Некорректный инструмент')
             width=stroke.get('width'); points=stroke.get('points')
             if type(width) not in (int,float) or not 1<=width<=40 or not isinstance(points,list) or not 1<=len(points)<=4000: raise HTTPException(422,'Некорректная линия')
             total+=len(points)
@@ -464,14 +467,16 @@ def update_task(tid:int,d:dict,user:User=Depends(current_user),db:Session=Depend
     for k in ('title','subject','description','priority'):
         if k in d: setattr(t,k,str(d[k])[:{'title':240,'subject':120,'description':5000,'priority':12}[k]])
     if 'due' in d:t.due=clean_date(d['due'])
-    if 'done' in d:t.done=bool(d['done'])
+    if 'done' in d:
+        record_task_completion(db,t,bool(d['done']));t.done=bool(d['done'])
     db.commit(); return {'ok':True}
 @app.delete('/api/tasks/{tid}')
 def del_task(tid:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     t=owned(db,Task,tid,user)
     for a in db.scalars(select(Attachment).where(Attachment.task_id==tid,Attachment.user_id==user.id)).all():
         (UPLOAD_DIR/a.stored_name).unlink(missing_ok=True); db.delete(a)
-    db.delete(t); db.commit(); return {'ok':True}
+    db.query(UserSetting).filter(UserSetting.user_id==user.id,UserSetting.key.in_(['whiteboard:'+str(tid),'task-completed:'+str(tid)])).delete(synchronize_session=False)
+    db.delete(t);db.commit();return {'ok':True}
 async def store_image(file:UploadFile):
     mime=file.content_type or mimetypes.guess_type(file.filename or '')[0]
     if mime not in ALLOWED_MIME: raise HTTPException(415,'Разрешены JPG, PNG, WEBP и GIF')
@@ -599,22 +604,29 @@ def del_card(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)): 
 def del_deck(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)): x=owned(db,Deck,id,user); db.delete(x); db.commit(); return {'ok':True}
 
 @app.get('/api/goals')
-def goals(user:User=Depends(current_user),db:Session=Depends(dbdep)): return [serialize(x) for x in db.scalars(select(Goal).where(Goal.user_id==user.id).order_by(Goal.done,Goal.id.desc())).all()]
+def goals(user:User=Depends(current_user),db:Session=Depends(dbdep)): return [{**serialize(x),**goal_details(db,user.id,x.id)} for x in db.scalars(select(Goal).where(Goal.user_id==user.id).order_by(Goal.done,Goal.id.desc())).all()]
 @app.post('/api/goals')
 def add_goal(d:dict,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     title=str(d.get('title','')).strip()
     if not title: raise HTTPException(422,'Укажи цель')
-    x=Goal(user_id=user.id,title=title[:180],description=str(d.get('description',''))[:3000],target=max(0.01,float(d.get('target',100))),progress=max(0,float(d.get('progress',0))),unit=str(d.get('unit','%'))[:40],deadline=clean_date(d.get('deadline'))); x.done=x.progress>=x.target; db.add(x); db.commit(); db.refresh(x); return serialize(x)
+    for key in ('target','progress'):
+        if key in d and (type(d[key]) not in (int,float) or not __import__('math').isfinite(d[key])):raise HTTPException(422,'Некорректное числовое значение')
+    x=Goal(user_id=user.id,title=title[:180],description=str(d.get('description',''))[:3000],target=max(0.01,float(d.get('target',100))),progress=max(0,float(d.get('progress',0))),unit=str(d.get('unit','%'))[:40],deadline=clean_date(d.get('deadline'))); x.done=x.progress>=x.target;db.add(x);db.flush();initialize_goal_blocks(db,user,x,d);db.commit();db.refresh(x);return {**serialize(x),**goal_details(db,user.id,x.id)}
 @app.put('/api/goals/{id}')
 def update_goal(id:int,d:dict,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     x=owned(db,Goal,id,user)
-    if 'progress' in d: x.progress=max(0,float(d['progress'])); x.done=x.progress>=x.target
+    if 'progress' in d:
+        if goal_details(db,user.id,id)['blocks']:raise HTTPException(409,'Прогресс этой цели считается по пунктам')
+        value=d['progress']
+        if type(value) not in (int,float) or not __import__('math').isfinite(value):raise HTTPException(422,'Некорректный прогресс')
+        x.progress=max(0,value);x.done=x.progress>=x.target
     if 'title' in d: x.title=str(d['title'])[:180]
     if 'description' in d:x.description=str(d['description'])[:3000]
     if 'deadline' in d:x.deadline=clean_date(d['deadline'])
     db.commit(); return {'ok':True}
 @app.delete('/api/goals/{id}')
-def del_goal(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)): x=owned(db,Goal,id,user); db.delete(x); db.commit(); return {'ok':True}
+def del_goal(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
+    x=owned(db,Goal,id,user);db.query(UserSetting).filter(UserSetting.user_id==user.id,UserSetting.key.in_(['goal-blocks:'+str(id),'goal-history:'+str(id)])).delete(synchronize_session=False);db.delete(x);db.commit();return {'ok':True}
 
 @app.get('/api/events')
 def events(user:User=Depends(current_user),db:Session=Depends(dbdep)): return [serialize(x) for x in db.scalars(select(CalendarEvent).where(CalendarEvent.user_id==user.id).order_by(CalendarEvent.start_at)).all()]
@@ -925,3 +937,16 @@ def put_lesson_notes(d:dict,user:User=Depends(current_user),db:Session=Depends(d
     row.value=json.dumps(notes,ensure_ascii=False);db.commit();return notes
 
 
+
+
+from platform_features import install as install_platform_features
+globals().update(install_platform_features(globals()))
+
+
+
+@app.get('/orbit/{group}')
+@app.get('/orbit/{group}/{section}')
+@app.get('/assistant')
+@app.get('/search')
+def orbit_entry(group:str='',section:str=''):
+    return FileResponse(BASE/'static'/'index.html',headers={'Cache-Control':'no-cache'})

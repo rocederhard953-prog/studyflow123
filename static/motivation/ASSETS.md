@@ -1,27 +1,43 @@
-# Motivation illustrations
+# Minimal black cosmic banners
 
-Generated with the built-in image_gen tool. Optimized JPEG assets used by the homepage carousel.
+Generated using the built-in image_gen tool. Final project assets are JPEG backgrounds; white Russian typography stays live HTML. The website animates the image and restrained star/light layers, with off-screen pause and reduced-motion support.
 
-## small-step
+## quiet-orbit
 
-Path: static/motivation/small-step.jpg
+Asset: `static/motivation/quiet-orbit.jpg`
 
-Prompt:
+Final prompt:
 
-Use case: stylized-concept. Asset type: wide landscape hero background for the My-Study study and habits website. Create a premium cinematic 3D illustration, coherent with a dark space interface featuring a planet and floating islands. Navy, indigo and restrained violet with a small warm light. Wide 16:9 composition. Keep the LEFT half calm, dark and spacious so HTML motivational text can be overlaid there. Main scenery on the right and visible when center-cropped on mobile. No typography, no letters, no UI, no borders, no logos, no watermark. Polished lighting, tactile rock and soft atmospheric depth, subtle stars, not cluttered. Scene: a small stone path on a floating island rising toward a distant luminous planet. A few stepping stones in the foreground communicate progress one step at a time. Quiet, hopeful mood.
+Use case: stylized-concept. Asset type: premium minimalist website motivational hero BACKGROUND, wide 16:9 landscape. Entire palette strictly neutral BLACK and WHITE with faint charcoal grey, absolutely no colored tint. 85 percent of the image is near pure black negative space, a few tiny crisp white distant stars. Left 58 percent must be almost empty uninterrupted black for separate white HTML headline; no objects behind the text zone. Subject in the right third, elegant minimal cinematic astrophotography / refined 3D lighting, lots of empty space, restrained silver rim light, matte black cosmic scene. Keep important subject inside right-middle area so a shallow wide banner crop still reads. No text, lettering, labels, typography, logos, UI, borders or watermark. Do not add furniture, buildings, plants, people, planets in the left half, clouds or busy scenery. Subject: one near-black spherical planet at the right, with one thin luminous white tilted orbital ring, subtly illuminated silhouette. Calm, spacious, the ring softly glows without blooming into white haze.
 
-## steady-growth
+## silver-crescent
 
-Path: static/motivation/steady-growth.jpg
+Asset: `static/motivation/silver-crescent.jpg`
 
-Prompt:
+Final prompt:
 
-Use case: stylized-concept. Asset type: wide landscape hero background for the My-Study study and habits website. Create a premium cinematic 3D illustration, coherent with a dark space interface featuring a planet and floating islands. Navy, indigo and restrained violet with a small warm light. Wide 16:9 composition. Keep the LEFT half calm, dark and spacious so HTML motivational text can be overlaid there. Main scenery on the right and visible when center-cropped on mobile. No typography, no letters, no UI, no borders, no logos, no watermark. Polished lighting, tactile rock and soft atmospheric depth, subtle stars, not cluttered. Scene: a small vibrant sprout growing on a beautifully sculpted floating rock island under a violet nebula, with soft light on its leaves. The island and sprout sit on the right. Quiet perseverance and growth.
+Use case: stylized-concept. Asset type: premium minimalist website motivational hero BACKGROUND, wide 16:9 landscape. Entire palette strictly neutral BLACK and WHITE with faint charcoal grey, absolutely no colored tint. 85 percent of the image is near pure black negative space, a few tiny crisp white distant stars. Left 58 percent must be almost empty uninterrupted black for separate white HTML headline; no objects behind the text zone. Subject in the right third, elegant minimal cinematic astrophotography / refined 3D lighting, lots of empty space, restrained silver rim light, matte black cosmic scene. Keep important subject inside right-middle area so a shallow wide banner crop still reads. No text, lettering, labels, typography, logos, UI, borders or watermark. Do not add furniture, buildings, plants, people, planets in the left half, clouds or busy scenery. Subject: a single large almost-black moon at the far right with an exceptionally thin silver-white crescent edge. Very subtle realistic crater texture only on the lit rim. A sparse black star field, profound silence.
 
-## focus-time
+## small-stars
 
-Path: static/motivation/focus-time.jpg
+Asset: `static/motivation/small-stars.jpg`
 
-Prompt:
+Final prompt:
 
-Use case: stylized-concept. Asset type: wide landscape hero background for the My-Study study and habits website. Create a premium cinematic 3D illustration, coherent with a dark space interface featuring a planet and floating islands. Navy, indigo and restrained violet with a small warm light. Wide 16:9 composition. Keep the LEFT half calm, dark and spacious so HTML motivational text can be overlaid there. Main scenery on the right and visible when center-cropped on mobile. No typography, no letters, no UI, no borders, no logos, no watermark. Polished lighting, tactile rock and soft atmospheric depth, subtle stars, not cluttered. Scene: a peaceful study terrace on a floating island, an open notebook and a softly glowing desk lamp, looking toward a large planet over the horizon. No people. Cozy concentration, refined and uncluttered, main objects on the right.
+Use case: stylized-concept. Asset type: premium minimalist website motivational hero BACKGROUND, wide 16:9 landscape. Entire palette strictly neutral BLACK and WHITE with faint charcoal grey, absolutely no colored tint. 85 percent of the image is near pure black negative space, a few tiny crisp white distant stars. Left 58 percent must be almost empty uninterrupted black for separate white HTML headline; no objects behind the text zone. Subject in the right third, elegant minimal cinematic astrophotography / refined 3D lighting, lots of empty space, restrained silver rim light, matte black cosmic scene. Keep important subject inside right-middle area so a shallow wide banner crop still reads. No text, lettering, labels, typography, logos, UI, borders or watermark. Do not add furniture, buildings, plants, people, planets in the left half, clouds or busy scenery. Subject: a restrained ascending trail of seven tiny white stars in the right third, leading toward one slightly brighter star. Minimal, precise celestial dots linked by extremely faint silver light. Mostly black, no big light source.
+
+## focus-ring
+
+Asset: `static/motivation/focus-ring.jpg`
+
+Final prompt:
+
+Use case: stylized-concept. Asset type: premium minimalist website motivational hero BACKGROUND, wide 16:9 landscape. Entire palette strictly neutral BLACK and WHITE with faint charcoal grey, absolutely no colored tint. 85 percent of the image is near pure black negative space, a few tiny crisp white distant stars. Left 58 percent must be almost empty uninterrupted black for separate white HTML headline; no objects behind the text zone. Subject in the right third, elegant minimal cinematic astrophotography / refined 3D lighting, lots of empty space, restrained silver rim light, matte black cosmic scene. Keep important subject inside right-middle area so a shallow wide banner crop still reads. No text, lettering, labels, typography, logos, UI, borders or watermark. Do not add furniture, buildings, plants, people, planets in the left half, clouds or busy scenery. Subject: two precise thin luminous white concentric orbital ellipses floating in the right third, one small silver satellite dot on the orbit, tiny charcoal-black central sphere. Sculptural calm astronomical study of orbits, without any clock numbers or marks.
+
+## new-horizon
+
+Asset: `static/motivation/new-horizon.jpg`
+
+Final prompt:
+
+Use case: stylized-concept. Asset type: premium minimalist website motivational hero BACKGROUND, wide 16:9 landscape. Entire palette strictly neutral BLACK and WHITE with faint charcoal grey, absolutely no colored tint. 85 percent of the image is near pure black negative space, a few tiny crisp white distant stars. Left 58 percent must be almost empty uninterrupted black for separate white HTML headline; no objects behind the text zone. Subject in the right third, elegant minimal cinematic astrophotography / refined 3D lighting, lots of empty space, restrained silver rim light, matte black cosmic scene. Keep important subject inside right-middle area so a shallow wide banner crop still reads. No text, lettering, labels, typography, logos, UI, borders or watermark. Do not add furniture, buildings, plants, people, planets in the left half, clouds or busy scenery. Subject: an extremely dark planetary horizon curving upward from lower right corner, with one thin restrained white sunrise rim and one small distant star above. Minimal monochrome cosmic landscape, no actual bright sun disk, no clouds, no color.

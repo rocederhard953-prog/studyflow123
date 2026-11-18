@@ -1,0 +1,14 @@
+const WB_SHAPES=[['rectangle','Прямоугольник'],['ellipse','Круг / овал'],['triangle','Треугольник'],['parallelogram','Параллелограмм'],['arrow','Стрелка'],['cylinder','Цилиндр'],['box','Параллелепипед'],['cone','Конус'],['sphere','Шар'],['pyramid','Пирамида']];
+function wbIsShape(tool){return WB_SHAPES.some(([key])=>key===tool);}
+function wbShapesHTML(){return `<label class="wb-shape-picker">Фигуры<select id="wbShapeSelect"><option value="">Выбрать фигуру</option>${WB_SHAPES.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label>`;}
+function wbShapePaths(stroke){const a=stroke.points[0],b=stroke.points.at(-1),x=Math.min(a[0],b[0]),y=Math.min(a[1],b[1]),w=Math.max(1,Math.abs(b[0]-a[0])),h=Math.max(1,Math.abs(b[1]-a[1])),r=x+w,bottom=y+h,cx=x+w/2,cy=y+h/2;
+ const ellipse=(px,py,rx,ry)=>Array.from({length:65},(_,i)=>[px+Math.cos(i/64*Math.PI*2)*rx,py+Math.sin(i/64*Math.PI*2)*ry]),rect=[[x,y],[r,y],[r,bottom],[x,bottom],[x,y]];
+ switch(stroke.tool){case 'rectangle':return [rect];case 'ellipse':return [ellipse(cx,cy,w/2,h/2)];case 'triangle':return [[[cx,y],[r,bottom],[x,bottom],[cx,y]]];case 'parallelogram':return [[[x+w*.25,y],[r,y],[x+w*.75,bottom],[x,bottom],[x+w*.25,y]]];case 'arrow':{const angle=Math.atan2(b[1]-a[1],b[0]-a[0]),len=Math.min(25,Math.hypot(b[0]-a[0],b[1]-a[1])*.25),clamp=p=>[Math.max(x,Math.min(r,p[0])),Math.max(y,Math.min(bottom,p[1]))];return [[a,b],[clamp([b[0]-len*Math.cos(angle-.55),b[1]-len*Math.sin(angle-.55)]),b,clamp([b[0]-len*Math.cos(angle+.55),b[1]-len*Math.sin(angle+.55)])]];}
+ case 'cylinder':{const ry=h*.13;return [ellipse(cx,y+ry,w/2,ry),ellipse(cx,bottom-ry,w/2,ry),[[x,y+ry],[x,bottom-ry]],[[r,y+ry],[r,bottom-ry]]];}
+ case 'box':{const dx=w*.23,dy=h*.22;return [[[x,y+dy],[r-dx,y+dy],[r-dx,bottom],[x,bottom],[x,y+dy]],[[x,y+dy],[x+dx,y],[r,y],[r-dx,y+dy]],[[r,y],[r,bottom-dy],[r-dx,bottom]],[[x+dx,y],[x+dx,bottom-dy],[r,bottom-dy]],[[x,bottom],[x+dx,bottom-dy]]];}
+ case 'cone':return [ellipse(cx,bottom-h*.12,w/2,h*.12),[[x,bottom-h*.12],[cx,y],[r,bottom-h*.12]]];
+ case 'sphere':return [ellipse(cx,cy,w/2,h/2),ellipse(cx,cy,w*.22,h/2),ellipse(cx,cy,w/2,h*.16)];
+ case 'pyramid':return [[[x,bottom-h*.15],[cx,bottom],[r,bottom-h*.15],[cx,bottom-h*.35],[x,bottom-h*.15]],[[x,bottom-h*.15],[cx,y],[r,bottom-h*.15]],[[cx,y],[cx,bottom]],[[cx,y],[cx,bottom-h*.35]]];default:return [];
+ }}
+function wbDrawShape(ctx,stroke){for(const points of wbShapePaths(stroke)){ctx.beginPath();ctx.moveTo(...points[0]);for(const point of points.slice(1))ctx.lineTo(...point);ctx.stroke();}}
+function bindBoardShapes(){const select=document.getElementById('wbShapeSelect');if(!select)return;select.value=wbIsShape(wb.tool)?wb.tool:'';select.onchange=()=>{if(wb.gesture)return;if(select.value){wb.tool=select.value;wbControls();}};}

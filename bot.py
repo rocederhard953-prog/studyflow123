@@ -6,7 +6,7 @@ import hmac
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select
 from app import (SessionLocal, User, TelegramCode, TelegramLink, NotificationSetting,
-                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders)
+                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders, habit_config, feature_get, feature_put, weekly_report_data, record_task_completion)
 
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
 API=f'https://api.telegram.org/bot{TOKEN}/'
@@ -19,83 +19,132 @@ STOP=threading.Event()
 DRAFTS={}
 DRAFT_LOCK=threading.Lock()
 
-# Track only interactive bot screens; scheduled notifications are not deleted.
+# A single persistent interactive message per chat. Notifications are independent.
 SCREEN_IDS={}
-SCREEN_LOCK=threading.Lock()
+SCREEN_META={}
+SCREEN_LOCK=threading.RLock()
 
-def delete_screen(chat, message_id):
-    if not message_id:return
-    try:tg('deleteMessage',{'chat_id':chat,'message_id':message_id},timeout=10)
-    except Exception:pass  # Telegram may refuse old messages or messages lacking permissions.
-
-def register_screen(chat, result, previous_id=None):
-    if not isinstance(result,dict) or not result.get('message_id'):return result
-    new_id=result['message_id']
+def menu_state(chat):
+    chat=str(chat)
     with SCREEN_LOCK:
-        old_id=SCREEN_IDS.get(str(chat))
-        SCREEN_IDS[str(chat)]=new_id
-    for mid in {old_id,previous_id}:
-        if mid and mid!=new_id:delete_screen(chat,mid)
+        if chat in SCREEN_IDS:return SCREEN_META.get(chat,{'message_id':SCREEN_IDS[chat],'photo':False})
+        with SessionLocal() as db:
+            user=linked_user(db,chat)
+            row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='bot-menu')) if user else None
+            try:state=json.loads(row.value) if row else {}
+            except (ValueError,TypeError):state={}
+        if state.get('message_id'):SCREEN_IDS[chat]=state['message_id'];SCREEN_META[chat]=state
+        return state
+
+def remember_menu(chat,state):
+    chat=str(chat)
+    with SCREEN_LOCK:
+        SCREEN_IDS[chat]=state['message_id'];SCREEN_META[chat]=state
+        with SessionLocal() as db:
+            user=linked_user(db,chat)
+            if user:
+                row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='bot-menu'))
+                if not row:row=UserSetting(user_id=user.id,key='bot-menu');db.add(row)
+                row.value=json.dumps(state,ensure_ascii=False);db.commit()
+
+def register_screen(chat,result,previous_id=None):
+    if isinstance(result,dict) and result.get('message_id'):
+        state=menu_state(chat).copy();state.update(message_id=result['message_id'],photo=bool(result.get('photo')))
+        remember_menu(chat,state)
     return result
 
-
-def tg(method, params=None, timeout=35):
+def tg(method,params=None,timeout=35):
     req=urllib.request.Request(API+method,data=urllib.parse.urlencode(params or {}).encode())
-    with urllib.request.urlopen(req,timeout=timeout) as r: data=json.loads(r.read().decode())
-    if not data.get('ok'): raise RuntimeError(data.get('description','Telegram API error'))
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as r:data=json.loads(r.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:description=json.loads(exc.read().decode()).get('description','Telegram API error')
+        except Exception:description='Telegram HTTP '+str(exc.code)
+        raise RuntimeError(description) from None
+    if not data.get('ok'):raise RuntimeError(data.get('description','Telegram API error'))
     return data.get('result')
 
 def keyboard(rows=None):
-    rows=[[dict(button, style='primary') for button in row] for row in (rows or [])]
+    rows=[[dict(button,style='primary') for button in row] for row in (rows or [])]
     rows.append([{'text':'🚀 Открыть My-Study','web_app':{'url':SITE},'style':'primary'}])
     rows.append([{'text':'🌐 Открыть в браузере','url':SITE,'style':'primary'}])
     return json.dumps({'inline_keyboard':rows},ensure_ascii=False)
 
-def send(chat,text,rows=None,message_id=None):
-    params={'chat_id':chat,'text':text+'\n\n🌐 '+SITE,'disable_web_page_preview':'true','reply_markup':keyboard(rows)}
-    if message_id:
-        params['message_id']=message_id
-        try: return register_screen(chat,tg('editMessageText',params,timeout=20),message_id)
-        except Exception: pass
-    return register_screen(chat,tg('sendMessage',params,timeout=20),message_id)
+def menu_chunks(text,limit=850):
+    chunks=[]
+    while text:
+        end=len(text) if len(text)<=limit else text.rfind('\n',0,limit)
+        if end<=0:end=limit
+        chunks.append(text[:end]);text=text[end:].lstrip('\n')
+    return chunks or ['']
 
-def linked_user(db,chat):
-    link=db.scalar(select(TelegramLink).where(TelegramLink.chat_id==str(chat)))
-    return db.get(User,link.user_id) if link else None
+def paint_menu(chat,text,rows=None,message_id=None,section=None,page_index=0,photo_image=None):
+    # Do not replace a message on network failures, rate limits or an unchanged edit.
+    with SCREEN_LOCK:
+        state=menu_state(chat).copy();mid=state.get('message_id') or message_id
+        pages=menu_chunks(text);page_index=max(0,min(page_index,len(pages)-1))
+        rows=list(rows or [])
+        navigation=[]
+        if page_index:navigation.append({'text':'← Назад','callback_data':'menupage:'+str(page_index-1)})
+        if page_index+1<len(pages):navigation.append({'text':'Далее →','callback_data':'menupage:'+str(page_index+1)})
+        visible_rows=([navigation] if navigation else [])+rows
+        content=pages[page_index]+(f'\n\n{page_index+1}/{len(pages)}' if len(pages)>1 else '')+'\n\n🌐 '+SITE
+        image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule','tomorrow':'schedule'}.get(section)
+        photo=bool(state.get('photo'))
+        desired_image=photo_image or ('/static/bot_images/'+image_name+'.jpg' if image_name else state.get('image'))
+        params={'chat_id':chat,'reply_markup':keyboard(visible_rows)}
+        def upload_photo(method,fields):
+            boundary='----mystudy'+uuid.uuid4().hex;parts=[]
+            for name,value in fields.items():parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
+            path=str(UPLOAD_DIR/desired_image.split(':',1)[1]) if desired_image.startswith('upload:') else os.path.join(os.path.dirname(__file__),desired_image.lstrip('/'))
+            with open(path,'rb') as f:raw=f.read()
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="menu.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode()+raw+b'\r\n')
+            req=urllib.request.Request(API+method,data=b''.join(parts)+f'--{boundary}--\r\n'.encode(),headers={'Content-Type':'multipart/form-data; boundary='+boundary})
+            try:
+                with urllib.request.urlopen(req,timeout=25) as response:result=json.loads(response.read().decode())
+            except urllib.error.HTTPError as exc:
+                try:description=json.loads(exc.read().decode()).get('description','Telegram API error')
+                except Exception:description='Telegram HTTP '+str(exc.code)
+                raise RuntimeError(description) from None
+            if not result.get('ok'):raise RuntimeError(result.get('description','Telegram API error'))
+            return result['result']
+        try:
+            if mid:
+                params['message_id']=mid
+                if desired_image and (not photo or desired_image!=state.get('image')):
+                    params['media']=json.dumps({'type':'photo','media':'attach://photo','caption':content},ensure_ascii=False)
+                    result=upload_photo('editMessageMedia',params);photo=True
+                elif photo:result=tg('editMessageCaption',{**params,'caption':content},timeout=20)
+                else:result=tg('editMessageText',{**params,'text':content,'disable_web_page_preview':'true'},timeout=20)
+            else:
+                if desired_image:result=upload_photo('sendPhoto',{**params,'caption':content});photo=True
+                else:result=tg('sendMessage',{**params,'text':content,'disable_web_page_preview':'true'},timeout=20)
+        except RuntimeError as exc:
+            error=str(exc).lower()
+            if 'message is not modified' in error:result={'message_id':mid}
+            elif mid and any(x in error for x in ('message to edit not found',"message can't be edited",'message_id_invalid')):
+                # The user deleted the menu, or Telegram no longer permits editing it.
+                remember_menu(chat,{} | {'message_id':None});return paint_menu(chat,text,rows,section=section,page_index=page_index)
+            else:raise
+        mid=result.get('message_id',mid) if isinstance(result,dict) else mid
+        remember_menu(chat,{'message_id':mid,'photo':photo,'image':desired_image,'text':text,'rows':rows,'section':section})
+        return result
+
+def send(chat,text,rows=None,message_id=None):return paint_menu(chat,text,rows,message_id)
 
 def main_menu():
     return [[{'text':'📅 Мой день','callback_data':'today'},{'text':'📚 Домашка','callback_data':'homework'}],
             [{'text':'✅ Привычки','callback_data':'habits'},{'text':'🗓 Расписание','callback_data':'schedule'}],
             [{'text':'🔔 Напоминания','callback_data':'reminders'},{'text':'🌙 Сводка','callback_data':'summary'}]]
 
-def back(): return [[{'text':'⬅️ Главное меню','callback_data':'menu'}]]
+def back():return [[{'text':'⬅️ Главное меню','callback_data':'menu'}]]
 
-def send_section(chat,section,text,rows=None,message_id=None):
-    image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule','tomorrow':'schedule'}.get(section)
-    image_path=os.path.join(os.path.dirname(__file__),'static','bot_images',(image_name or '')+'.jpg')
-    caption=text+'\n\n🌐 '+SITE
-    if not image_name or not os.path.isfile(image_path) or len(caption)>1024:
-        return send(chat,text,rows,message_id)
-    boundary='----mystudy'+uuid.uuid4().hex
-    parts=[]
-    def part(name,value,filename=None):
-        header=f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
-        if filename:header+=f'; filename="{filename}"\r\nContent-Type: image/jpeg'
-        parts.append((header+'\r\n\r\n').encode()+value+b'\r\n')
-    part('chat_id',str(chat).encode())
-    part('caption',caption.encode())
-    part('reply_markup',keyboard(rows).encode())
-    with open(image_path,'rb') as f:part('photo',f.read(),image_name+'.jpg')
-    body=b''.join(parts)+f'--{boundary}--\r\n'.encode()
-    req=urllib.request.Request(API+'sendPhoto',data=body,headers={'Content-Type':'multipart/form-data; boundary='+boundary})
-    try:
-        with urllib.request.urlopen(req,timeout=25) as response:
-            data=json.loads(response.read().decode())
-        if not data.get('ok'):raise RuntimeError(data.get('description','sendPhoto failed'))
-        return register_screen(chat,data.get('result'),message_id)
-    except Exception as exc:
-        print('Section photo failed:',repr(exc),flush=True)
-        return send(chat,text,rows,message_id)
+def send_section(chat,section,text,rows=None,message_id=None):return paint_menu(chat,text,rows,message_id,section)
+
+
+def linked_user(db,chat):
+    link=db.scalar(select(TelegramLink).where(TelegramLink.chat_id==str(chat)))
+    return db.get(User,link.user_id) if link else None
 
 def admin_authorized(chat):
     if not ADMIN_ID or str(chat)!=ADMIN_ID:return False
@@ -143,12 +192,12 @@ def display(chat,section='menu',message_id=None):
         if section=='today':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
-            eligible=[h for h in hs if str(wd) in h.days.split(',')]
+            eligible=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(wd) in h.days.split(','))]
             tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False)).all()
             return send_section(chat,section,f'📅 Сегодня, {today:%d.%m.%Y}\n\nПривычки: {len([h for h in eligible if h.id in checks])}/{len(eligible)}\nНевыполненных заданий: {len(tasks)}\nНа сегодня: {len([t for t in tasks if t.due==today])}',back(),message_id)
         if section=='habits':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
-            hs=[h for h in hs if str(wd) in h.days.split(',')]
+            hs=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(wd) in h.days.split(','))]
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
             rows=[[{'text':'➕ Добавить привычку','callback_data':'addhabit'}]]+[[{'text':('↩️ ' if h.id in checks else '☑️ ')+h.name[:40], 'callback_data':f'habit:{h.id}'}] for h in hs[:20]]+back()
             return send_section(chat,section,'✅ Привычки на сегодня\n\nНажми на привычку, чтобы изменить отметку.' if hs else 'Сегодня привычек нет.',rows,message_id)
@@ -373,18 +422,23 @@ def callback(q):
 def _callback_impl(q):
     chat=str(q.get('message',{}).get('chat',{}).get('id',''))
     mid=q.get('message',{}).get('message_id'); action=q.get('data','')
-    with SCREEN_LOCK:screen=SCREEN_IDS.get(chat)
+    screen=menu_state(chat).get('message_id')
     if mid!=screen:mid=None  # Never edit or delete a persistent notification.
     try: tg('answerCallbackQuery',{'callback_query_id':q['id']},timeout=10)
     except Exception: pass
     if not chat:return
-    if action.startswith(('ndone:', 'nsnooze:', 'nphoto:', 'nopen:')):return task_notification_action(chat,action)
+    if action.startswith(('ndone:', 'nsnooze:', 'nphoto:', 'nopen:')):return task_notification_action(chat,action,interactive=True)
+    if action.startswith('menupage:'):
+        state=menu_state(chat)
+        try:index=int(action.split(':',1)[1])
+        except ValueError:return
+        return paint_menu(chat,state.get('text',''),state.get('rows'),section=state.get('section'),page_index=index)
     if action=='summary':
         with SessionLocal() as db:
             user=linked_user(db,chat)
             if not user:return display(chat,'menu',mid)
             content,tasks=evening_summary(db,user,datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo(user.timezone or 'UTC')))
-            return send_long_notification(chat,content)
+            return send(chat,content,back(),mid)
     if action=='addhw':return start_homework(chat,mid)
     if action=='addhabit':return start_habit(chat,mid)
     if action.startswith('habitdays:'):return habit_days(chat,action,mid)
@@ -438,12 +492,13 @@ def _callback_impl(q):
                 h=db.scalar(select(Habit).where(Habit.id==ident,Habit.user_id==user.id))
                 if h:
                     check=db.scalar(select(HabitCheck).where(HabitCheck.habit_id==ident,HabitCheck.user_id==user.id,HabitCheck.day==today))
+                    progress=feature_get(db,user.id,f'habit-progress:{ident}:{today}',{});progress['amount']=0 if check else habit_config(db,user.id,ident)['target'];feature_put(db,user.id,f'habit-progress:{ident}:{today}',progress)
                     if check: db.delete(check)
                     else: db.add(HabitCheck(user_id=user.id,habit_id=ident,day=today))
                 section='habits'
             else:
                 t=db.scalar(select(Task).where(Task.id==ident,Task.user_id==user.id))
-                if t:t.done=True
+                if t:record_task_completion(db,t,True);t.done=True
                 section='homework'
             db.commit()
         return display(chat,section,mid)
@@ -470,7 +525,7 @@ def habit_days(chat,action,mid=None):
     with SessionLocal() as db:
         user=linked_user(db,chat)
         if not user:return send(chat,'Аккаунт не привязан.')
-        db.add(Habit(user_id=user.id,name=draft['name'],days=days));db.commit()
+        db.add(Habit(user_id=user.id,name=draft['name'],days=days,created_at=local_today(user)));db.commit()
     cancel_draft(chat)
     return send(chat,'✅ Привычка добавлена!',[[{'text':'➕ Ещё привычка','callback_data':'addhabit'}]]+back(),mid)
 
@@ -499,7 +554,7 @@ def broadcast_send(chat,mid=None):
     with SessionLocal() as db:chats=list(dict.fromkeys(db.scalars(select(TelegramLink.chat_id)).all()))
     sent=failed=0
     for recipient in chats:
-        try:send(recipient,'📢 Новости My-Study\n\n'+draft['text']);sent+=1
+        try:notify(recipient,'📢 Новости My-Study\n\n'+draft['text']);sent+=1
         except Exception as exc:failed+=1;print('Broadcast error:',repr(exc),flush=True)
         time.sleep(.08)
     return send(chat,f'Рассылка завершена. Доставлено: {sent}; ошибок: {failed}.',back(),mid)
@@ -562,30 +617,38 @@ def send_task_photo(chat,attachment):
     if not result.get('ok'):raise RuntimeError(result.get('description','Photo failed'))
     return True
 
-def task_notification_action(chat,action):
+def task_notification_action(chat,action,interactive=False):
+    respond=send if interactive else notify
     kind,_,value=action.partition(':')
-    try:ident=int(value)
+    try:
+        values=value.split(':');ident=int(values[0]);photo_index=int(values[1]) if len(values)>1 else 0
     except ValueError:return
     with SessionLocal() as db:
         user=linked_user(db,chat)
-        if not user:return notify(chat,'Сначала привяжи аккаунт My-Study.')
+        if not user:return respond(chat,'Сначала привяжи аккаунт My-Study.')
         task=db.scalar(select(Task).where(Task.id==ident,Task.user_id==user.id))
-        if not task:return notify(chat,'Задание удалено или недоступно.')
-        if kind=='nopen':return notify_task(chat,task)
+        if not task:return respond(chat,'Задание удалено или недоступно.')
+        if kind=='nopen':return send(chat,task_text(task),task_rows(task)+back()) if interactive else notify_task(chat,task)
         if kind=='ndone':
-            task.done=True
+            record_task_completion(db,task,True);task.done=True
             db.query(TaskSnooze).filter_by(user_id=user.id,task_id=task.id).delete()
             db.commit()
-            return notify(chat,'✅ Выполнено\n\n'+task_text(task))
+            return respond(chat,'✅ Выполнено\n\n'+task_text(task))
         if kind=='nsnooze':
-            if task.done:return notify(chat,'Это задание уже выполнено.')
+            if task.done:return respond(chat,'Это задание уже выполнено.')
             row=db.scalar(select(TaskSnooze).where(TaskSnooze.user_id==user.id,TaskSnooze.task_id==task.id))
             if row is None:row=TaskSnooze(user_id=user.id,task_id=task.id);db.add(row)
             row.send_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)+datetime.timedelta(hours=1)
             db.commit()
-            return notify(chat,'⏰ Напомню через час. Срок сдачи не изменён.\n\n'+task_text(task))
+            return respond(chat,'⏰ Напомню через час. Срок сдачи не изменён.\n\n'+task_text(task))
         photos=db.scalars(select(Attachment).where(Attachment.task_id==task.id,Attachment.user_id==user.id).order_by(Attachment.id)).all()
-        if not photos:return notify(chat,'У этого задания пока нет фотографий.\n\n'+task_text(task))
+        if not photos:return respond(chat,'У этого задания пока нет фотографий.\n\n'+task_text(task))
+        if interactive:
+            photo_index=max(0,min(photo_index,len(photos)-1));selected=photos[photo_index]
+            navigation=[]
+            if photo_index:navigation.append({'text':'← Фото','callback_data':f'nphoto:{task.id}:{photo_index-1}'})
+            if photo_index+1<len(photos):navigation.append({'text':'Фото →','callback_data':f'nphoto:{task.id}:{photo_index+1}'})
+            return paint_menu(chat,task_text(task)+f'\n\nФото {photo_index+1}/{len(photos)}',([navigation] if navigation else [])+task_rows(task)+back(),section='taskphoto',photo_image='upload:'+selected.stored_name)
         sent=0
         for photo in photos:
             try:sent+=bool(send_task_photo(chat,photo))
@@ -602,7 +665,7 @@ def evening_summary(db,user,local):
     tasks=homework_for_day(db,user,tomorrow)
     habits=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
     checks={c.habit_id for c in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
-    pending=[h for h in habits if str(local.weekday()) in h.days.split(',') and h.id not in checks]
+    pending=[h for h in habits if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(local.weekday()) in h.days.split(',')) and h.id not in checks]
     lines=[f'🌙 My-Study · Вечерняя сводка',f'📅 Завтра, {tomorrow:%d.%m.%Y}', '\n🗓 Уроки']
     lines.extend([f'{l.period}. {l.subject} · {l.start or "время не указано"}' for l in lessons] or ['Уроков нет.'])
     lines.append('\n📚 Домашнее задание')
@@ -633,11 +696,28 @@ def snooze_tick(db,utc):
         except Exception as exc:
             db.rollback();print('Snooze error:',repr(exc),flush=True)
 
+def weekly_report_tick(db,user,link,setting,local):
+    prefs=feature_get(db,user.id,'weekly-report-prefs',{})
+    if not prefs.get('enabled') or (setting and not setting.enabled):return
+    if local.weekday()!=prefs.get('weekday',6) or local.strftime('%H:%M')!=prefs.get('time','19:00'):return
+    if setting and in_quiet(local,setting.quiet_start,setting.quiet_end):return
+    day=local.date().isoformat()
+    if feature_get(db,user.id,'weekly-report-last')==day:return
+    report=weekly_report_data(db,user,local.date())
+    text=f"📈 Итоги недели · {report['start']} — {report['end']}\n\n📚 Выполнено ДЗ: {report['tasks_done']}\n✅ Привычки: {report['habits_done']}/{report['habits_total']} · {report['habits_percent']}%\n📝 Заданий в работе: {report['tasks_open']}"
+    notify(link.chat_id,text,back());feature_put(db,user.id,'weekly-report-last',day);db.commit()
+
 def notification_tick():
     utc=datetime.datetime.now(datetime.timezone.utc)
     with SessionLocal() as db:
         for user in db.scalars(select(User).join(TelegramLink,TelegramLink.user_id==User.id)).all():
             ensure_default_reminders(db,user.id)
+            try:
+                link=db.scalar(select(TelegramLink).where(TelegramLink.user_id==user.id))
+                setting=db.scalar(select(NotificationSetting).where(NotificationSetting.user_id==user.id))
+                weekly_report_tick(db,user,link,setting,utc.astimezone(ZoneInfo(user.timezone or 'UTC')))
+            except Exception as exc:
+                db.rollback();print('Weekly report error:',repr(exc),flush=True)
         db.commit()
         snooze_tick(db,utc)
         reminders=db.scalars(select(Reminder).where(Reminder.enabled==True)).all()
@@ -694,7 +774,7 @@ def notification_tick():
                 elif reminder.kind=='habits':
                     hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
                     checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
-                    pending=[h for h in hs if str(local.weekday()) in h.days.split(',') and h.id not in checks]
+                    pending=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(local.weekday()) in h.days.split(',')) and h.id not in checks]
                     content+='\n\n'+('\n'.join('• '+h.name for h in pending[:6]) if pending else 'Все привычки выполнены!')
                 elif reminder.kind in ('schedule','schedule_tomorrow'):
                     target_day=local.date()+datetime.timedelta(days=1) if reminder.kind=='schedule_tomorrow' else local.date()
@@ -733,3 +813,4 @@ def main():
         except Exception:traceback.print_exc();time.sleep(5)
 
 if __name__=='__main__':main()
+
