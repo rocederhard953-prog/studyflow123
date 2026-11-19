@@ -12,7 +12,7 @@ async function updateTaskCheckbox(input){
       const values=document.querySelectorAll('#content .stats-grid .stat-value');const tasks=cache.tasks||[];const counts=[tasks.length,tasks.filter(t=>!t.done).length,tasks.filter(t=>t.done).length,tasks.filter(t=>t.attachments?.length).length];values.forEach((el,i)=>{if(i<counts.length)el.textContent=counts[i];});
     }
     if(page==='home'||page==='day'){const label=document.querySelector('.day-metrics > div:first-child small');if(label)label.textContent=ruPlural((cache.tasks||[]).filter(t=>!t.done).length,'задание','задания','заданий')+' в работе';const count=document.querySelector('.day-metrics > div:first-child b');if(count)count.textContent=(cache.tasks||[]).filter(t=>!t.done).length;refreshHomeMenuCounts();}
-    if(done&&typeof spaceCelebrateTask==='function')spaceCelebrateTask(input);if(typeof paintDayPlan==='function'&&page==='day')paintDayPlan();
+    if(typeof markRecentlyChanged==='function')markRecentlyChanged(row);if(done&&typeof spaceCelebrateTask==='function')spaceCelebrateTask(input);if(typeof paintDayPlan==='function'&&page==='day')paintDayPlan();
     if(typeof showUndo==='function')showUndo(done?'Задание выполнено':'Задание снова в работе',async()=>{if(me?.id!==user)return;input.checked=!done;await updateTaskCheckbox(input);});else toast(done?'Задание выполнено':'Задание снова в работе');
  }catch(e){input.checked=!done;toast(e.message);}finally{input.disabled=false;}
 }
