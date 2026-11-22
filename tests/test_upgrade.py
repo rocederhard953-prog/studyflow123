@@ -10,6 +10,15 @@ from sqlalchemy import select
 app=fixtures.app
 
 class UpgradeTests(PlatformTests):
+    def test_task_chat_persists_and_is_not_visible_to_another_account(self):
+        task=fixtures.V21Tests.task(self)
+        with patch.object(app.assistant,'ai_configured',return_value=True),patch.object(app.assistant,'ask_ai',return_value={'reply':'x = 2','actions':[],'source':'ai'}):
+            response=self.client.post('/api/assistant/chat',json={'message':'Solve 2x = 4','task_id':task.id},headers=self.headers)
+            self.assertEqual(response.status_code,200,response.text)
+        url=f'/api/tasks/{task.id}/chat';self.assertEqual(self.client.get(url).json()[-1]['content'],'x = 2')
+        app.app.dependency_overrides[app.current_user]=lambda:self.other
+        self.assertEqual(self.client.get(url).status_code,404)
+
     def test_board_history_is_owned_and_contains_previous_revision(self):
         task=fixtures.V21Tests.task(self);url='/api/whiteboard?task_id='+str(task.id)
         data={'revision':0,'strokes':[],'images':[],'grid':True,'layout':'large-v1'}

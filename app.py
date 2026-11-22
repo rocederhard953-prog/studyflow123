@@ -882,7 +882,13 @@ def assistant_chat(data:assistant.AssistantRequest,user:User=Depends(current_use
     assistant.acquire_slot(user.id)
     try:
         reserve_ai_request(db,user.id)
-        return assistant.ask_ai(data,context,images)
+        result=assistant.ask_ai(data,context,images)
+        if task:
+            key='task-chat:'+str(task.id)
+            history=upgrade_get(db,user.id,key,[])
+            history.extend([{'role':'user','content':data.message},{'role':'assistant','content':str(result.get('reply',''))[:16000]}])
+            upgrade_put(db,user.id,key,history[-40:]);db.commit()
+        return result
     finally:
         assistant.release_slot(user.id)
 

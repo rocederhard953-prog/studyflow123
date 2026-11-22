@@ -54,7 +54,7 @@ def install(c):
         data=c['serialize'](obj);children=[];settings=[]
         if kind=='task':
             children=[c['serialize'](a) for a in db.scalars(select(c['Attachment']).where(c['Attachment'].task_id==obj.id,c['Attachment'].user_id==user.id)).all()]
-            for key in ('whiteboard:','board-history:','task-steps:','task-completed:'):
+            for key in ('whiteboard:','board-history:','task-steps:','task-completed:','task-chat:'):
                 row=db.scalar(select(Setting).where(Setting.user_id==user.id,Setting.key==key+str(obj.id)))
                 if row:settings.append([key,json.loads(row.value)]);db.delete(row)
             db.query(c['Attachment']).filter(c['Attachment'].task_id==obj.id).delete(synchronize_session=False)
@@ -154,6 +154,9 @@ def install(c):
     @app.get('/api/tasks/{tid}/steps')
     def task_steps(tid:int,user=Depends(auth),db=Depends(dep)):
         c['owned'](db,c['Task'],tid,user);return get(db,user.id,'task-steps:'+str(tid),[])
+    @app.get('/api/tasks/{tid}/chat')
+    def task_chat(tid:int,user=Depends(auth),db=Depends(dep)):
+        c['owned'](db,c['Task'],tid,user);return get(db,user.id,'task-chat:'+str(tid),[])
     @app.put('/api/tasks/{tid}/steps')
     def save_steps(tid:int,d:dict,user=Depends(auth),db=Depends(dep)):
         c['owned'](db,c['Task'],tid,user);items=d.get('items')
