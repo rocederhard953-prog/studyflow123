@@ -442,6 +442,14 @@ def save_whiteboard(d:dict,task_id:int|None=None,user:User=Depends(current_user)
     if pages is not None: result['pages']=pages
     value=json.dumps(result,separators=(',',':'))
     if len(value)>(32000000 if large else (4000000 if task_id is not None else 1000000)): raise HTTPException(413,'Доска слишком большая. Экспортируй PNG.')
+    if row and old.get('strokes') is not None:
+        history_key='board-history:'+str(task_id or 'personal')
+        history=upgrade_get(db,user.id,history_key,[])
+        history.append({'at':datetime.now(timezone.utc).isoformat(),'document':old})
+        while len(history)>12 or len(json.dumps(history))>4000000:
+            if not history:break
+            history.pop(0)
+        upgrade_put(db,user.id,history_key,history)
     if row:
         count=db.query(UserSetting).filter(UserSetting.id==row.id,UserSetting.value==row.value).update({'value':value},synchronize_session=False)
         if count!=1: db.rollback(); raise HTTPException(409,'Доска изменена в другом окне')
@@ -473,10 +481,7 @@ def update_task(tid:int,d:dict,user:User=Depends(current_user),db:Session=Depend
 @app.delete('/api/tasks/{tid}')
 def del_task(tid:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
     t=owned(db,Task,tid,user)
-    for a in db.scalars(select(Attachment).where(Attachment.task_id==tid,Attachment.user_id==user.id)).all():
-        (UPLOAD_DIR/a.stored_name).unlink(missing_ok=True); db.delete(a)
-    db.query(UserSetting).filter(UserSetting.user_id==user.id,UserSetting.key.in_(['whiteboard:'+str(tid),'task-completed:'+str(tid)])).delete(synchronize_session=False)
-    db.delete(t);db.commit();return {'ok':True}
+    return upgrade_trash(db,user,'task',t)
 async def store_image(file:UploadFile):
     mime=file.content_type or mimetypes.guess_type(file.filename or '')[0]
     if mime not in ALLOWED_MIME: raise HTTPException(415,'Разрешены JPG, PNG, WEBP и GIF')
@@ -579,7 +584,7 @@ async def add_cheat(title:str=Form(...),subject:str=Form(''),note:str=Form(''),f
     stored,mime,name=await store_image(file); x=CheatSheet(user_id=user.id,title=title[:180],subject=subject[:120],note=note[:3000],stored_name=stored,filename=name,mime=mime); db.add(x); db.commit(); db.refresh(x); return serialize(x)
 @app.delete('/api/cheatsheets/{id}')
 def del_cheat(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
-    x=owned(db,CheatSheet,id,user); (UPLOAD_DIR/x.stored_name).unlink(missing_ok=True); db.delete(x); db.commit(); return {'ok':True}
+    x=owned(db,CheatSheet,id,user); return upgrade_trash(db,user,'cheat',x)
 
 @app.get('/api/decks')
 def decks(user:User=Depends(current_user),db:Session=Depends(dbdep)):
@@ -626,7 +631,7 @@ def update_goal(id:int,d:dict,user:User=Depends(current_user),db:Session=Depends
     db.commit(); return {'ok':True}
 @app.delete('/api/goals/{id}')
 def del_goal(id:int,user:User=Depends(current_user),db:Session=Depends(dbdep)):
-    x=owned(db,Goal,id,user);db.query(UserSetting).filter(UserSetting.user_id==user.id,UserSetting.key.in_(['goal-blocks:'+str(id),'goal-history:'+str(id)])).delete(synchronize_session=False);db.delete(x);db.commit();return {'ok':True}
+    x=owned(db,Goal,id,user); return upgrade_trash(db,user,'goal',x)
 
 @app.get('/api/events')
 def events(user:User=Depends(current_user),db:Session=Depends(dbdep)): return [serialize(x) for x in db.scalars(select(CalendarEvent).where(CalendarEvent.user_id==user.id).order_by(CalendarEvent.start_at)).all()]
@@ -950,3 +955,6 @@ globals().update(install_platform_features(globals()))
 @app.get('/search')
 def orbit_entry(group:str='',section:str=''):
     return FileResponse(BASE/'static'/'index.html',headers={'Cache-Control':'no-cache'})
+
+from upgrade_features import install as install_upgrade_features
+globals().update(install_upgrade_features(globals()))

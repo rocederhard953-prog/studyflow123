@@ -35,7 +35,7 @@ def install(core):
         for row in records:
             try:values[row.key.rsplit(':',1)[1]]=json.loads(row.value)
             except ValueError:pass
-        return {'config':config(db,uid,hid),'progress':values}
+        return {'config':config(db,uid,hid),'progress':values,'pause':get(db,uid,'habit-pause:'+str(hid),{'periods':[]})}
 
     def validate_config(d):
         if not isinstance(d,dict):raise HTTPException(422,'Некорректные параметры привычки')
@@ -167,12 +167,13 @@ def install(core):
         for check in checks:by.setdefault(check.habit_id,set()).add(check.day)
         done=total=0;rows=[]
         for h in habits:
-            cfg=config(db,user.id,h.id);d=start;buckets={}
+            cfg=config(db,user.id,h.id);d=start;buckets={};pauses=get(db,user.id,'habit-pause:'+str(h.id),{'periods':[]}).get('periods',[])
+            def paused(day):return any(p['start']<=str(day)<=p['end'] for p in pauses)
             while d<=end:
-                if d>=h.created_at and (cfg['mode']=='weekly' or str(d.weekday()) in h.days.split(',')):
+                if d>=h.created_at and not paused(d) and (cfg['mode']=='weekly' or str(d.weekday()) in h.days.split(',')):
                     wk=d-timedelta(days=d.weekday());bucket=buckets.setdefault(wk,[0,0]);bucket[1]+=1;bucket[0]+=d in by.get(h.id,set())
                 d+=timedelta(days=1)
-            target=sum(min(cfg['weekly_target'],7-max(0,min(6,(h.created_at-wk).days))) if cfg['mode']=='weekly' else v[1] for wk,v in buckets.items())
+            target=sum(min(cfg['weekly_target'],sum(wk+timedelta(days=i)>=h.created_at and not paused(wk+timedelta(days=i)) for i in range(7))) if cfg['mode']=='weekly' else v[1] for wk,v in buckets.items())
             hits=sum(min(v[0],cfg['weekly_target']) if cfg['mode']=='weekly' else v[0] for v in buckets.values());done+=hits;total+=target
             rows.append({'name':h.name,'done':hits,'total':target})
         minutes=0

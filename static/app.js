@@ -17,7 +17,7 @@ let pageRenderTicket=0,lastRenderedPage=null;
 async function renderPage(){
  const ticket=++pageRenderTicket,route=page,el=document.getElementById('content');el.setAttribute('aria-busy','true');
  const loading=setTimeout(()=>{if(ticket===pageRenderTicket&&!el.innerHTML.trim())el.innerHTML='<div class="empty loading-state">Загружаем твои данные…</div>';},150);
- try{const render={whiteboard:whiteboardPage,assistant:assistantPage,home:homePage,orbit:orbitLandingPage,day:dayPage,calendar:calendarPage,habits:habitsPage,tasks:tasksPage,schedule:schedulePage,grades:gradesPage,cheats:cheatsPage,cards:cardsPage,goals:goalsPage,pomodoro:pomodoroPage,analytics:analyticsPage,telegram:telegramPage,reminders:remindersPage,appearance:appearancePage,settings:settingsPage,developer:developerPage,subjects:subjectColorsPage,search:searchPage}[route];if(!render)throw Error('Неизвестный раздел');const html=await render();if(ticket!==pageRenderTicket||page!==route)return;const positions=typeof captureRecordRects==='function'?captureRecordRects(el):null;el.innerHTML=html;bindCommon();if(positions&&typeof animateRecordReflow==='function')animateRecordReflow(el,positions);if(lastRenderedPage!==route)animatePageEntrance(el);lastRenderedPage=route;}
+ try{const render={whiteboard:whiteboardPage,assistant:assistantPage,home:homePage,orbit:orbitLandingPage,day:dayPage,calendar:calendarPage,habits:habitsPage,tasks:tasksPage,schedule:schedulePage,grades:gradesPage,cheats:cheatsPage,cards:cardsPage,goals:goalsPage,pomodoro:pomodoroPage,analytics:analyticsPage,telegram:telegramPage,reminders:remindersPage,appearance:appearancePage,settings:settingsPage,developer:developerPage,subjects:subjectColorsPage,search:searchPage}[route];if(!render)throw Error('Неизвестный раздел');const html=await render();if(ticket!==pageRenderTicket||page!==route)return;const positions=typeof captureRecordRects==='function'?captureRecordRects(el):null;el.innerHTML=html;bindCommon();if(typeof enhanceExpansion==='function')enhanceExpansion();if(positions&&typeof animateRecordReflow==='function')animateRecordReflow(el,positions);if(lastRenderedPage!==route)animatePageEntrance(el);lastRenderedPage=route;}
  catch(e){if(ticket===pageRenderTicket&&page===route){el.innerHTML=`<div class="card"><h3>Не удалось загрузить раздел</h3><p class="muted">${esc(e.message||'Неизвестная ошибка')}</p><button class="primary" onclick="renderPage()">Повторить</button></div>`;throw e;}}
  finally{clearTimeout(loading);if(ticket===pageRenderTicket)el.removeAttribute('aria-busy');}
 }
@@ -177,7 +177,7 @@ function prevMonth(){calendarCursor.setMonth(calendarCursor.getMonth()-1);render
 $('#quickAdd').onclick=()=>{openModal('Быстрое добавление',`<div class="list">${[['Задание','newTask'],['Привычка','newHabit'],['Цель','newGoal'],['Событие','newEvent'],['Заметка','newNote']].map(([n,a])=>`<button class="list-item quick-action" data-quick="${a}"><b>${n}</b><span class="muted">＋</span></button>`).join('')}</div>`);$$('[data-quick]').forEach(b=>b.onclick=()=>{closeModal();action(b.dataset.quick)})};
 async function boot(){try{me=await api('/me');showApp()}catch(error){showAuth();if(error.message!=='Требуется вход'&&error.message!=='Сессия истекла'){console.error(error);$('#authError').textContent=error.message}}}
 
-boot();
+document.addEventListener('DOMContentLoaded',()=>boot());
 
 async function newReminder(existing=null){
  const r=existing||{title:'',kind:'schedule_tomorrow',send_time:'19:00',days:'0,1,2,3,4,5,6',enabled:true};

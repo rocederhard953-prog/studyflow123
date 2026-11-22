@@ -6,7 +6,7 @@ import hmac
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select
 from app import (SessionLocal, User, TelegramCode, TelegramLink, NotificationSetting,
-                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders, habit_config, feature_get, feature_put, weekly_report_data, record_task_completion)
+                 Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders, habit_config, feature_get, feature_put, weekly_report_data, record_task_completion, upgrade_channels, upgrade_habit_scheduled)
 
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
 API=f'https://api.telegram.org/bot{TOKEN}/'
@@ -192,12 +192,12 @@ def display(chat,section='menu',message_id=None):
         if section=='today':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
-            eligible=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(wd) in h.days.split(','))]
+            eligible=[h for h in hs if upgrade_habit_scheduled(db,user,h,today)]
             tasks=db.scalars(select(Task).where(Task.user_id==user.id,Task.done==False)).all()
             return send_section(chat,section,f'📅 Сегодня, {today:%d.%m.%Y}\n\nПривычки: {len([h for h in eligible if h.id in checks])}/{len(eligible)}\nНевыполненных заданий: {len(tasks)}\nНа сегодня: {len([t for t in tasks if t.due==today])}',back(),message_id)
         if section=='habits':
             hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
-            hs=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(wd) in h.days.split(','))]
+            hs=[h for h in hs if upgrade_habit_scheduled(db,user,h,today)]
             checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==today)).all()}
             rows=[[{'text':'➕ Добавить привычку','callback_data':'addhabit'}]]+[[{'text':('↩️ ' if h.id in checks else '☑️ ')+h.name[:40], 'callback_data':f'habit:{h.id}'}] for h in hs[:20]]+back()
             return send_section(chat,section,'✅ Привычки на сегодня\n\nНажми на привычку, чтобы изменить отметку.' if hs else 'Сегодня привычек нет.',rows,message_id)
@@ -665,7 +665,7 @@ def evening_summary(db,user,local):
     tasks=homework_for_day(db,user,tomorrow)
     habits=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
     checks={c.habit_id for c in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
-    pending=[h for h in habits if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(local.weekday()) in h.days.split(',')) and h.id not in checks]
+    pending=[h for h in habits if upgrade_habit_scheduled(db,user,h,local.date()) and h.id not in checks]
     lines=[f'🌙 My-Study · Вечерняя сводка',f'📅 Завтра, {tomorrow:%d.%m.%Y}', '\n🗓 Уроки']
     lines.extend([f'{l.period}. {l.subject} · {l.start or "время не указано"}' for l in lessons] or ['Уроков нет.'])
     lines.append('\n📚 Домашнее задание')
@@ -727,8 +727,13 @@ def notification_tick():
                 link=db.scalar(select(TelegramLink).where(TelegramLink.user_id==reminder.user_id))
                 setting=db.scalar(select(NotificationSetting).where(NotificationSetting.user_id==reminder.user_id))
                 if not user or not link or (setting and not setting.enabled):continue
+                preferences=upgrade_channels(db,user.id)
+                channel='tasks' if reminder.kind in ('tasks','homework_eve') else 'habits' if reminder.kind=='habits' else 'general'
+                if preferences[channel] not in ('telegram','both'):continue
                 try: local=utc.astimezone(ZoneInfo(user.timezone or 'UTC'))
                 except Exception: local=utc
+                from upgrade_features import quiet
+                if quiet(local,preferences['quiet_start'],preferences['quiet_end']):continue
                 timing=db.get(ReminderTiming,reminder.id)
                 mode=timing.mode if timing else 'fixed'
                 if mode!='fixed':
@@ -774,7 +779,7 @@ def notification_tick():
                 elif reminder.kind=='habits':
                     hs=db.scalars(select(Habit).where(Habit.user_id==user.id)).all()
                     checks={x.habit_id for x in db.scalars(select(HabitCheck).where(HabitCheck.user_id==user.id,HabitCheck.day==local.date())).all()}
-                    pending=[h for h in hs if (habit_config(db,user.id,h.id)['mode']=='weekly' or str(local.weekday()) in h.days.split(',')) and h.id not in checks]
+                    pending=[h for h in hs if upgrade_habit_scheduled(db,user,h,local.date()) and h.id not in checks]
                     content+='\n\n'+('\n'.join('• '+h.name for h in pending[:6]) if pending else 'Все привычки выполнены!')
                 elif reminder.kind in ('schedule','schedule_tomorrow'):
                     target_day=local.date()+datetime.timedelta(days=1) if reminder.kind=='schedule_tomorrow' else local.date()
