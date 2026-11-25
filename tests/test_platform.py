@@ -68,7 +68,7 @@ class PlatformTests(unittest.TestCase):
         with patch.object(bot,'tg',side_effect=RuntimeError('Bad Request: message is not modified')) as tg:
             bot.send('123','Same');self.assertEqual(tg.call_count,1)
         with patch.object(bot,'tg',side_effect=TimeoutError('offline')) as tg:
-            with self.assertRaises(TimeoutError):bot.send('123','Same')
+            with self.assertRaises(TimeoutError):bot.send('123','Changed')
             self.assertEqual(tg.call_count,1)
 
     def test_photo_sections_edit_media_in_same_message(self):
@@ -84,7 +84,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(bot.SCREEN_IDS['123'],42)
 
     def test_menu_pagination_preserves_all_text_and_uses_caption(self):
-        bot.remember_menu('123',{'message_id':42,'photo':True,'image':'/static/bot_images/my-study.jpg'})
+        digest,_=bot.image_data(app.BASE/'static/bot_images/my-study.jpg')
+        bot.remember_menu('123',{'message_id':42,'photo':True,'image':'/static/bot_images/my-study.jpg','image_hash':digest})
         text=('Задание\n'*300)+'Последнее'
         with patch.object(bot,'tg',return_value={'message_id':42}) as tg:
             bot.send('123',text,bot.back())

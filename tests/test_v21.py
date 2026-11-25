@@ -42,11 +42,11 @@ class V21Tests(unittest.TestCase):
                          due=date(2026, 11, 14), **fields)
             db.add(t); db.commit(); return t
 
-    def test_blue_keyboard_does_not_mutate_input(self):
+    def test_native_keyboard_does_not_mutate_input(self):
         import json
         rows = [[{'text': 'Home', 'callback_data': 'menu'}]]
         keys = json.loads(bot.keyboard(rows))['inline_keyboard']
-        self.assertTrue(all(b['style'] == 'primary' for r in keys for b in r))
+        self.assertTrue(all('style' not in b for r in keys for b in r))
         self.assertNotIn('style', rows[0][0])
 
     def test_task_notification_contains_subject_date_and_actions(self):

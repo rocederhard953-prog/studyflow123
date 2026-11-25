@@ -8,6 +8,8 @@ from sqlalchemy import select
 from app import (SessionLocal, User, TelegramCode, TelegramLink, NotificationSetting,
                  Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders, habit_config, feature_get, feature_put, weekly_report_data, record_task_completion, upgrade_channels, upgrade_habit_scheduled)
 
+from bot_support import MediaCache, image_data, signature, reusable_media_error, quick_keyboard, QUICK_ACTIONS, COMMAND_ACTIONS, COMMANDS, notification_loop
+
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
 API=f'https://api.telegram.org/bot{TOKEN}/'
 SITE=os.getenv('SITE_URL','https://my-study.bothost.tech').rstrip('/')
@@ -23,6 +25,12 @@ DRAFT_LOCK=threading.Lock()
 SCREEN_IDS={}
 SCREEN_META={}
 SCREEN_LOCK=threading.RLock()
+CHAT_MENU_LOCKS={}
+QUICK_MENU_VERSION=1
+MEDIA_CACHE=MediaCache(UPLOAD_DIR.parent,TOKEN)
+
+def chat_menu_lock(chat):
+    with SCREEN_LOCK:return CHAT_MENU_LOCKS.setdefault(str(chat),threading.RLock())
 
 def menu_state(chat):
     chat=str(chat)
@@ -65,9 +73,9 @@ def tg(method,params=None,timeout=35):
     return data.get('result')
 
 def keyboard(rows=None):
-    rows=[[dict(button,style='primary') for button in row] for row in (rows or [])]
-    rows.append([{'text':'🚀 Открыть My-Study','web_app':{'url':SITE},'style':'primary'}])
-    rows.append([{'text':'🌐 Открыть в браузере','url':SITE,'style':'primary'}])
+    rows=[[{key:value for key,value in button.items() if key!='style'} for button in row] for row in (rows or [])]
+    rows.append([{'text':'🚀 Открыть My-Study','web_app':{'url':SITE}}])
+    rows.append([{'text':'🌐 Открыть в браузере','url':SITE}])
     return json.dumps({'inline_keyboard':rows},ensure_ascii=False)
 
 def menu_chunks(text,limit=850):
@@ -79,56 +87,75 @@ def menu_chunks(text,limit=850):
     return chunks or ['']
 
 def paint_menu(chat,text,rows=None,message_id=None,section=None,page_index=0,photo_image=None):
-    # Do not replace a message on network failures, rate limits or an unchanged edit.
-    with SCREEN_LOCK:
+    # Serialize one chat only: slow network calls must not hold the global state lock.
+    with chat_menu_lock(chat):
         state=menu_state(chat).copy();mid=state.get('message_id') or message_id
-        pages=menu_chunks(text);page_index=max(0,min(page_index,len(pages)-1))
-        rows=list(rows or [])
+        pages=menu_chunks(text);page_index=max(0,min(page_index,len(pages)-1));rows=list(rows or [])
         navigation=[]
         if page_index:navigation.append({'text':'← Назад','callback_data':'menupage:'+str(page_index-1)})
         if page_index+1<len(pages):navigation.append({'text':'Далее →','callback_data':'menupage:'+str(page_index+1)})
         visible_rows=([navigation] if navigation else [])+rows
         content=pages[page_index]+(f'\n\n{page_index+1}/{len(pages)}' if len(pages)>1 else '')+'\n\n🌐 '+SITE
         image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule','tomorrow':'schedule'}.get(section)
-        photo=bool(state.get('photo'))
-        desired_image=photo_image or ('/static/bot_images/'+image_name+'.jpg' if image_name else state.get('image'))
+        photo=bool(state.get('photo'));desired_image=photo_image or ('/static/bot_images/'+image_name+'.jpg' if image_name else state.get('image'))
+        image_hash=None;raw=None
+        if desired_image:
+            path=UPLOAD_DIR/desired_image.split(':',1)[1] if desired_image.startswith('upload:') else os.path.join(os.path.dirname(__file__),desired_image.lstrip('/'))
+            image_hash,raw=image_data(path)
         params={'chat_id':chat,'reply_markup':keyboard(visible_rows)}
+        fingerprint=signature(content,params['reply_markup'],image_hash)
+        if mid and fingerprint==state.get('signature'):return {'message_id':mid}
         def upload_photo(method,fields):
             boundary='----mystudy'+uuid.uuid4().hex;parts=[]
             for name,value in fields.items():parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
-            path=str(UPLOAD_DIR/desired_image.split(':',1)[1]) if desired_image.startswith('upload:') else os.path.join(os.path.dirname(__file__),desired_image.lstrip('/'))
-            with open(path,'rb') as f:raw=f.read()
-            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="menu.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode()+raw+b'\r\n')
+            mime='image/png' if raw.startswith(b'\x89PNG') else 'image/jpeg'
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="menu.jpg"\r\nContent-Type: {mime}\r\n\r\n').encode()+raw+b'\r\n')
             req=urllib.request.Request(API+method,data=b''.join(parts)+f'--{boundary}--\r\n'.encode(),headers={'Content-Type':'multipart/form-data; boundary='+boundary})
             try:
-                with urllib.request.urlopen(req,timeout=25) as response:result=json.loads(response.read().decode())
+                with urllib.request.urlopen(req,timeout=20) as response:result=json.loads(response.read().decode())
             except urllib.error.HTTPError as exc:
                 try:description=json.loads(exc.read().decode()).get('description','Telegram API error')
                 except Exception:description='Telegram HTTP '+str(exc.code)
                 raise RuntimeError(description) from None
             if not result.get('ok'):raise RuntimeError(result.get('description','Telegram API error'))
             return result['result']
+        def photo_request(method,fields):
+            file_id=MEDIA_CACHE.get(image_hash)
+            if file_id:
+                cached=dict(fields)
+                if method=='editMessageMedia':
+                    media=json.loads(cached['media']);media['media']=file_id;cached['media']=json.dumps(media,ensure_ascii=False)
+                else:cached['photo']=file_id
+                try:return tg(method,cached,timeout=20)
+                except RuntimeError as error:
+                    if not reusable_media_error(error):raise
+                    MEDIA_CACHE.discard(image_hash)
+            result=upload_photo(method,fields)
+            photos=result.get('photo',[]) if isinstance(result,dict) else []
+            if isinstance(photos,list) and photos and isinstance(photos[-1],dict):MEDIA_CACHE.set(image_hash,photos[-1].get('file_id'))
+            return result
         try:
             if mid:
                 params['message_id']=mid
-                if desired_image and (not photo or desired_image!=state.get('image')):
+                changed=desired_image!=state.get('image') or image_hash!=state.get('image_hash')
+                if desired_image and (not photo or changed):
                     params['media']=json.dumps({'type':'photo','media':'attach://photo','caption':content},ensure_ascii=False)
-                    result=upload_photo('editMessageMedia',params);photo=True
+                    result=photo_request('editMessageMedia',params);photo=True
                 elif photo:result=tg('editMessageCaption',{**params,'caption':content},timeout=20)
                 else:result=tg('editMessageText',{**params,'text':content,'disable_web_page_preview':'true'},timeout=20)
             else:
-                if desired_image:result=upload_photo('sendPhoto',{**params,'caption':content});photo=True
+                if desired_image:result=photo_request('sendPhoto',{**params,'caption':content});photo=True
                 else:result=tg('sendMessage',{**params,'text':content,'disable_web_page_preview':'true'},timeout=20)
         except RuntimeError as exc:
             error=str(exc).lower()
             if 'message is not modified' in error:result={'message_id':mid}
             elif mid and any(x in error for x in ('message to edit not found',"message can't be edited",'message_id_invalid')):
-                # The user deleted the menu, or Telegram no longer permits editing it.
-                remember_menu(chat,{} | {'message_id':None});return paint_menu(chat,text,rows,section=section,page_index=page_index)
+                remember_menu(chat,{'message_id':None});return paint_menu(chat,text,rows,section=section,page_index=page_index,photo_image=photo_image)
             else:raise
         mid=result.get('message_id',mid) if isinstance(result,dict) else mid
-        remember_menu(chat,{'message_id':mid,'photo':photo,'image':desired_image,'text':text,'rows':rows,'section':section})
+        remember_menu(chat,{'message_id':mid,'photo':photo,'image':desired_image,'image_hash':image_hash,'signature':fingerprint,'text':text,'rows':rows,'section':section})
         return result
+
 
 def send(chat,text,rows=None,message_id=None):return paint_menu(chat,text,rows,message_id)
 
@@ -140,6 +167,28 @@ def main_menu():
 def back():return [[{'text':'⬅️ Главное меню','callback_data':'menu'}]]
 
 def send_section(chat,section,text,rows=None,message_id=None):return paint_menu(chat,text,rows,message_id,section)
+
+
+def ensure_quick_menu(chat,force=False):
+    """One persistent keyboard announcement, not a new message per navigation."""
+    with SessionLocal() as db:
+        user=linked_user(db,chat)
+        if not user:return False
+        row=db.scalar(select(UserSetting).where(UserSetting.user_id==user.id,UserSetting.key=='bot-quick-menu'))
+        try:installed=json.loads(row.value) if row else {}
+        except ValueError:installed={}
+        if not force and installed.get('version')==QUICK_MENU_VERSION and installed.get('chat')==str(chat):return False
+    result=tg('sendMessage',{'chat_id':chat,'text':'Быстрый доступ — на клавиатуре внизу. Выбери раздел одним нажатием.','disable_notification':'true','reply_markup':quick_keyboard(SITE)},timeout=15)
+    with SessionLocal() as db:
+        # Recheck the link after the network call; never attach state to a different account.
+        linked=linked_user(db,chat)
+        if linked and linked.id==user.id:
+            feature_put(db,user.id,'bot-quick-menu',{'version':QUICK_MENU_VERSION,'chat':str(chat),'message_id':result.get('message_id') if isinstance(result,dict) else None});db.commit()
+    return True
+
+def start_notification_worker():
+    worker=threading.Thread(target=notification_loop,args=(notification_tick,STOP),kwargs={'on_error':traceback.print_exc},name='studyflow-telegram-reminders',daemon=True)
+    worker.start();return worker
 
 
 def linked_user(db,chat):
@@ -382,6 +431,12 @@ def handle(msg):
     if command=='/login' or (command=='/start' and payload=='login'):return send_auth_link(msg,'login')
     if command=='/reset' or (command=='/start' and payload=='reset'):return send_auth_link(msg,'reset')
     if command=='/admin':return admin_login(chat)
+    quick_action=QUICK_ACTIONS.get(text) or COMMAND_ACTIONS.get(command)
+    if command in ('/quick','/start') and not payload or quick_action:
+        cancel_draft(chat)
+        try:ensure_quick_menu(chat,force=command=='/quick')
+        except Exception:traceback.print_exc()
+        return display(chat,quick_action or 'menu')
     with DRAFT_LOCK: photo_step=DRAFTS.get(chat,{}).get('step')
     if msg.get('photo') and photo_step=='photos':return receive_homework_photo(chat,msg)
     if not text:return
@@ -410,7 +465,9 @@ def handle(msg):
             if old: old.chat_id=chat
             elif not bychat: db.add(TelegramLink(user_id=row.user_id,chat_id=chat))
             ensure_default_reminders(db,row.user_id);db.delete(row);db.commit()
-        return send(chat,'✅ Аккаунт успешно привязан! Выбирай нужный раздел.',main_menu())
+        try:ensure_quick_menu(chat)
+        except Exception:traceback.print_exc()
+        return send_section(chat,'menu','✅ Аккаунт успешно привязан! Выбирай нужный раздел.',main_menu())
     if cmd=='/admin':return admin_login(chat)
     aliases={'/today':'today','/habits':'habits','/homework':'homework','/schedule':'schedule','/tomorrow':'tomorrow'}
     cancel_draft(chat)
@@ -801,13 +858,14 @@ def main():
         tg('setChatMenuButton',{'menu_button':json.dumps({'type':'web_app','text':'My-Study','web_app':{'url':SITE}},ensure_ascii=False)},timeout=10)
     except Exception:print('Could not configure Mini App menu; retry on next restart',flush=True)
     print('StudyFlow Telegram bot running',flush=True)
-    offset=0;last_tick=0
+    offset=0
+    try:tg('setMyCommands',{'commands':json.dumps(COMMANDS,ensure_ascii=False)},timeout=10)
+    except Exception:print('Could not update bot command menu',flush=True)
+    start_notification_worker()
     try: tg('deleteWebhook',{'drop_pending_updates':'false'},timeout=10)
     except Exception as exc:print('Webhook warning:',repr(exc),flush=True)
     while not STOP.is_set():
         try:
-            if time.monotonic()-last_tick>=20:
-                notification_tick();last_tick=time.monotonic()
             updates=tg('getUpdates',{'offset':offset,'timeout':10,'allowed_updates':json.dumps(['message','callback_query'])},timeout=20)
             for update in updates:
                 offset=update['update_id']+1
@@ -815,7 +873,7 @@ def main():
                     if 'message' in update:handle(update['message'])
                     elif 'callback_query' in update:callback(update['callback_query'])
                 except Exception:traceback.print_exc()
-        except Exception:traceback.print_exc();time.sleep(5)
+        except Exception:traceback.print_exc();STOP.wait(5)
 
 if __name__=='__main__':main()
 
