@@ -130,9 +130,9 @@ class V21Tests(unittest.TestCase):
 
     def test_notification_navigation_preserves_original_message(self):
         bot.SCREEN_IDS['123'] = 222
-        with patch.object(bot, 'tg'), patch.object(bot, 'display') as display:
+        with patch.object(bot, 'tg'), patch.object(bot, 'show_visible_menu') as display:
             bot.callback({'id':'q','data':'today','message':{'message_id':111,'chat':{'id':123}}})
-        display.assert_called_once_with('123', 'today', None)
+        display.assert_called_once_with('123', 'today', 111)
 
     def test_summary_seed_is_once_and_preserves_custom_reminders(self):
         with app.SessionLocal() as db:

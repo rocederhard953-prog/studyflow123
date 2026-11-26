@@ -113,3 +113,65 @@ class BotFastTests(unittest.TestCase):
         worker=threading.Thread(target=notification_loop,args=(tick,stop),daemon=True);worker.start()
         try:self.assertTrue(started.wait(1));self.assertTrue(worker.is_alive())
         finally:stop.set();released.set();worker.join(2)
+
+    def test_every_message_has_desktop_inline_navigation_without_duplicate_buttons(self):
+        rows=[[{'text':'Мой день','callback_data':'today'}]]
+        markup=json.loads(bot.keyboard(rows))['inline_keyboard']
+        actions=[b['callback_data'] for row in markup for b in row if 'callback_data' in b]
+        self.assertEqual(set(actions),{'menu','today','homework','habits','schedule','reminders'})
+        self.assertEqual(len(actions),len(set(actions)))
+        self.assertEqual(len(rows),1)
+
+    def test_start_reveals_old_menu_below_notifications_and_coalesces_queued_commands(self):
+        digest,_=image_data(Path(bot.__file__).parent/'static/bot_images/my-study.jpg')
+        self.cache.set(digest,'main-cover')
+        bot.remember_menu('123',{'message_id':10,'photo':True,'image':'/static/bot_images/my-study.jpg','image_hash':digest})
+        def telegram(method,params,**kwargs):
+            if method=='sendPhoto':return {'message_id':150,'photo':[{'file_id':'main-cover'}]}
+            return {'message_id':params.get('message_id',150)}
+        with patch.object(bot,'ensure_quick_menu'),patch.object(bot,'tg',side_effect=telegram) as api:
+            for mid in range(100,107):bot.handle({'message_id':mid,'chat':{'id':123,'type':'private'},'text':'/start'})
+        self.assertEqual(bot.menu_state('123')['message_id'],150)
+        calls=[call.args[0] for call in api.call_args_list]
+        self.assertEqual(calls.count('sendPhoto'),1)
+        self.assertNotIn('deleteMessage',calls)
+        retired=[call.args[1]['message_id'] for call in api.call_args_list if call.args[0]=='editMessageReplyMarkup']
+        self.assertEqual(retired,[10])
+
+    def test_navigation_inside_active_menu_edits_the_same_message(self):
+        bot.remember_menu('123',{'message_id':150,'photo':False})
+        with patch.object(bot,'tg'),patch.object(bot,'display') as display,patch.object(bot,'show_visible_menu') as reveal:
+            bot.callback({'id':'q','data':'habits','message':{'message_id':150,'chat':{'id':123}}})
+        display.assert_called_once_with('123','habits',150);reveal.assert_not_called()
+
+    def test_navigation_from_new_notification_reveals_menu_without_changing_notification(self):
+        bot.remember_menu('123',{'message_id':10,'photo':False})
+        digest,_=image_data(Path(bot.__file__).parent/'static/bot_images/today.jpg');self.cache.set(digest,'day-cover')
+        with patch.object(bot,'tg',return_value={'message_id':90,'photo':[{'file_id':'day-cover'}]}) as api:
+            bot.callback({'id':'q','data':'today','message':{'message_id':80,'chat':{'id':123}}})
+        self.assertEqual(bot.menu_state('123')['message_id'],90)
+        self.assertTrue(any(call.args[0]=='sendPhoto' for call in api.call_args_list))
+        self.assertFalse(any(call.args[1].get('message_id')==80 for call in api.call_args_list))
+
+    def test_missing_cover_still_returns_a_visible_text_menu(self):
+        bot.remember_menu('123',{'message_id':10,'photo':False})
+        with patch.object(bot,'image_data',side_effect=FileNotFoundError('cover')),patch.object(bot,'tg',return_value={'message_id':90}) as api:
+            bot.show_visible_menu('123','menu',80)
+        self.assertTrue(any(call.args[0]=='sendMessage' for call in api.call_args_list))
+        self.assertEqual(bot.menu_state('123')['message_id'],90)
+
+    def test_missing_cover_does_not_prevent_opening_a_section(self):
+        bot.remember_menu('123',{'message_id':10,'photo':False})
+        with patch.object(bot,'image_data',side_effect=FileNotFoundError('cover')),patch.object(bot,'tg',return_value={'message_id':10}) as api:
+            bot.send_section('123','homework','Actual homework content')
+        self.assertEqual(api.call_args.args[0],'editMessageText')
+        self.assertIn('Actual homework content',api.call_args.args[1]['text'])
+        self.assertEqual(bot.menu_state('123')['message_id'],10)
+
+    def test_timeout_while_revealing_menu_keeps_previous_state_and_does_not_retire_it(self):
+        bot.remember_menu('123',{'message_id':10,'photo':False})
+        digest,_=image_data(Path(bot.__file__).parent/'static/bot_images/my-study.jpg');self.cache.set(digest,'cover')
+        with patch.object(bot,'tg',side_effect=TimeoutError('offline')) as api:
+            with self.assertRaises(TimeoutError):bot.show_visible_menu('123','menu',80)
+        self.assertEqual(bot.menu_state('123')['message_id'],10)
+        self.assertEqual(api.call_count,1)

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app import (SessionLocal, User, TelegramCode, TelegramLink, NotificationSetting,
                  Reminder, ReminderTiming, CalendarEvent, UserSetting, Habit, HabitCheck, Task, Lesson, Attachment, TaskSnooze, UPLOAD_DIR, MAX_UPLOAD, ensure_default_reminders, habit_config, feature_get, feature_put, weekly_report_data, record_task_completion, upgrade_channels, upgrade_habit_scheduled)
 
-from bot_support import MediaCache, image_data, signature, reusable_media_error, quick_keyboard, QUICK_ACTIONS, COMMAND_ACTIONS, COMMANDS, notification_loop
+from bot_support import MediaCache, image_data, signature, reusable_media_error, quick_keyboard, QUICK_ACTIONS, COMMAND_ACTIONS, COMMANDS, INLINE_NAVIGATION, notification_loop
 
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
 API=f'https://api.telegram.org/bot{TOKEN}/'
@@ -26,7 +26,8 @@ SCREEN_IDS={}
 SCREEN_META={}
 SCREEN_LOCK=threading.RLock()
 CHAT_MENU_LOCKS={}
-QUICK_MENU_VERSION=1
+QUICK_MENU_VERSION=2
+MENU_RENDER_CONTEXT=threading.local()
 MEDIA_CACHE=MediaCache(UPLOAD_DIR.parent,TOKEN)
 
 def chat_menu_lock(chat):
@@ -74,6 +75,10 @@ def tg(method,params=None,timeout=35):
 
 def keyboard(rows=None):
     rows=[[{key:value for key,value in button.items() if key!='style'} for button in row] for row in (rows or [])]
+    actions={button.get('callback_data') for row in rows for button in row}
+    for navigation in INLINE_NAVIGATION:
+        missing=[dict(button) for button in navigation if button['callback_data'] not in actions]
+        if missing:rows.append(missing)
     rows.append([{'text':'🚀 Открыть My-Study','web_app':{'url':SITE}}])
     rows.append([{'text':'🌐 Открыть в браузере','url':SITE}])
     return json.dumps({'inline_keyboard':rows},ensure_ascii=False)
@@ -89,7 +94,10 @@ def menu_chunks(text,limit=850):
 def paint_menu(chat,text,rows=None,message_id=None,section=None,page_index=0,photo_image=None):
     # Serialize one chat only: slow network calls must not hold the global state lock.
     with chat_menu_lock(chat):
-        state=menu_state(chat).copy();mid=state.get('message_id') or message_id
+        state=menu_state(chat).copy()
+        fresh=getattr(MENU_RENDER_CONTEXT,'fresh',False);MENU_RENDER_CONTEXT.fresh=False
+        text_only=getattr(MENU_RENDER_CONTEXT,'text_only',False)
+        mid=None if fresh else state.get('message_id') or message_id
         pages=menu_chunks(text);page_index=max(0,min(page_index,len(pages)-1));rows=list(rows or [])
         navigation=[]
         if page_index:navigation.append({'text':'← Назад','callback_data':'menupage:'+str(page_index-1)})
@@ -97,7 +105,8 @@ def paint_menu(chat,text,rows=None,message_id=None,section=None,page_index=0,pho
         visible_rows=([navigation] if navigation else [])+rows
         content=pages[page_index]+(f'\n\n{page_index+1}/{len(pages)}' if len(pages)>1 else '')+'\n\n🌐 '+SITE
         image_name={'menu':'my-study','today':'today','habits':'habits','reminders':'reminders','homework':'homework','schedule':'schedule','tomorrow':'schedule'}.get(section)
-        photo=bool(state.get('photo'));desired_image=photo_image or ('/static/bot_images/'+image_name+'.jpg' if image_name else state.get('image'))
+        photo=False if fresh else bool(state.get('photo'))
+        desired_image=None if text_only else photo_image or ('/static/bot_images/'+image_name+'.jpg' if image_name else state.get('image'))
         image_hash=None;raw=None
         if desired_image:
             path=UPLOAD_DIR/desired_image.split(':',1)[1] if desired_image.startswith('upload:') else os.path.join(os.path.dirname(__file__),desired_image.lstrip('/'))
@@ -166,7 +175,43 @@ def main_menu():
 
 def back():return [[{'text':'⬅️ Главное меню','callback_data':'menu'}]]
 
-def send_section(chat,section,text,rows=None,message_id=None):return paint_menu(chat,text,rows,message_id,section)
+def send_section(chat,section,text,rows=None,message_id=None):
+    fresh=getattr(MENU_RENDER_CONTEXT,'fresh',False)
+    try:return paint_menu(chat,text,rows,message_id,section)
+    except (FileNotFoundError,PermissionError):pass
+    except RuntimeError as error:
+        if not any(value in str(error).lower() for value in ('photo_invalid_dimensions','image_process_failed','photo must be non-empty','file must be non-empty',"can't parse media")):raise
+    # Optional artwork cannot prevent navigation; keep the section's real content.
+    previous=getattr(MENU_RENDER_CONTEXT,'text_only',False)
+    MENU_RENDER_CONTEXT.text_only=True;MENU_RENDER_CONTEXT.fresh=fresh
+    try:return paint_menu(chat,text,rows,message_id,section)
+    finally:MENU_RENDER_CONTEXT.text_only=previous
+
+
+def show_visible_menu(chat,section='menu',request_id=None):
+    """An explicit message/notification can reveal a menu buried above newer messages.
+
+    Inline navigation inside the active menu still edits that same message.
+    """
+    with chat_menu_lock(chat):
+        old=menu_state(chat).copy();old_id=old.get('message_id')
+        fresh=not old_id or request_id is None or request_id>old_id
+        previous_fresh=getattr(MENU_RENDER_CONTEXT,'fresh',False)
+        previous_text_only=getattr(MENU_RENDER_CONTEXT,'text_only',False)
+        MENU_RENDER_CONTEXT.fresh=fresh
+        try:
+            try:result=display(chat,section)
+            except (FileNotFoundError,PermissionError):
+                # A missing optional cover must never make /start unusable.
+                MENU_RENDER_CONTEXT.fresh=True;MENU_RENDER_CONTEXT.text_only=True
+                result=paint_menu(chat,'My-Study\nВыбери раздел кнопками ниже.',main_menu(),section='menu')
+        finally:
+            MENU_RENDER_CONTEXT.fresh=previous_fresh;MENU_RENDER_CONTEXT.text_only=previous_text_only
+        new_id=result.get('message_id') if isinstance(result,dict) else None
+        if fresh and old_id and new_id and old_id!=new_id:
+            try:tg('editMessageReplyMarkup',{'chat_id':chat,'message_id':old_id,'reply_markup':json.dumps({'inline_keyboard':[]})},timeout=5)
+            except Exception:pass
+        return result
 
 
 def ensure_quick_menu(chat,force=False):
@@ -178,7 +223,7 @@ def ensure_quick_menu(chat,force=False):
         try:installed=json.loads(row.value) if row else {}
         except ValueError:installed={}
         if not force and installed.get('version')==QUICK_MENU_VERSION and installed.get('chat')==str(chat):return False
-    result=tg('sendMessage',{'chat_id':chat,'text':'Быстрый доступ — на клавиатуре внизу. Выбери раздел одним нажатием.','disable_notification':'true','reply_markup':quick_keyboard(SITE)},timeout=15)
+    result=tg('sendMessage',{'chat_id':chat,'text':'Быстрый доступ есть под сообщениями бота — на телефоне и компьютере. Дополнительная клавиатура доступна внизу чата.','disable_notification':'true','reply_markup':quick_keyboard(SITE)},timeout=8)
     with SessionLocal() as db:
         # Recheck the link after the network call; never attach state to a different account.
         linked=linked_user(db,chat)
@@ -434,9 +479,10 @@ def handle(msg):
     quick_action=QUICK_ACTIONS.get(text) or COMMAND_ACTIONS.get(command)
     if command in ('/quick','/start') and not payload or quick_action:
         cancel_draft(chat)
+        result=show_visible_menu(chat,quick_action or 'menu',msg.get('message_id'))
         try:ensure_quick_menu(chat,force=command=='/quick')
         except Exception:traceback.print_exc()
-        return display(chat,quick_action or 'menu')
+        return result
     with DRAFT_LOCK: photo_step=DRAFTS.get(chat,{}).get('step')
     if msg.get('photo') and photo_step=='photos':return receive_homework_photo(chat,msg)
     if not text:return
@@ -471,19 +517,23 @@ def handle(msg):
     if cmd=='/admin':return admin_login(chat)
     aliases={'/today':'today','/habits':'habits','/homework':'homework','/schedule':'schedule','/tomorrow':'tomorrow'}
     cancel_draft(chat)
-    display(chat,aliases.get(cmd,'menu'))
+    return show_visible_menu(chat,aliases.get(cmd,'menu'),msg.get('message_id'))
 
 def callback(q):
     return _callback_impl(q)
 
 def _callback_impl(q):
     chat=str(q.get('message',{}).get('chat',{}).get('id',''))
-    mid=q.get('message',{}).get('message_id'); action=q.get('data','')
+    source_mid=q.get('message',{}).get('message_id');mid=source_mid; action=q.get('data','')
     screen=menu_state(chat).get('message_id')
     if mid!=screen:mid=None  # Never edit or delete a persistent notification.
     try: tg('answerCallbackQuery',{'callback_query_id':q['id']},timeout=10)
     except Exception: pass
     if not chat:return
+    if action in {'menu','today','homework','habits','schedule','tomorrow','reminders'}:
+        cancel_draft(chat)
+        if source_mid!=screen:return show_visible_menu(chat,action,source_mid)
+        return display(chat,action,mid)
     if action.startswith(('ndone:', 'nsnooze:', 'nphoto:', 'nopen:')):return task_notification_action(chat,action,interactive=True)
     if action.startswith('menupage:'):
         state=menu_state(chat)

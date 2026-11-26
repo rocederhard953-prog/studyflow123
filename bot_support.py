@@ -9,6 +9,9 @@ from functools import lru_cache
 
 QUICK_ACTIONS={'⌂ Главное меню':'menu','📅 Мой день':'today','📚 Домашка':'homework','✓ Привычки':'habits','🗓 Расписание':'schedule','🔔 Напоминания':'reminders'}
 COMMAND_ACTIONS={'/menu':'menu','/today':'today','/habits':'habits','/homework':'homework','/schedule':'schedule','/tomorrow':'tomorrow','/reminders':'reminders'}
+INLINE_NAVIGATION=[[{'text':'⌂ Главное меню','callback_data':'menu'},{'text':'📅 Мой день','callback_data':'today'}],
+                   [{'text':'📚 Домашка','callback_data':'homework'},{'text':'✓ Привычки','callback_data':'habits'}],
+                   [{'text':'🗓 Расписание','callback_data':'schedule'},{'text':'🔔 Напоминания','callback_data':'reminders'}]]
 COMMANDS=[{'command':name[1:],'description':label} for name,label in [('/menu','Главное меню'),('/today','Мой день'),('/homework','Домашние задания'),('/habits','Привычки'),('/schedule','Расписание'),('/reminders','Напоминания'),('/quick','Показать быстрое меню'),('/cancel','Отменить ввод')]]
 
 def quick_keyboard(site):
